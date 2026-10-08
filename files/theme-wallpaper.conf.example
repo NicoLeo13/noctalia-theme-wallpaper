@@ -1,0 +1,55 @@
+# theme-wallpaper.conf
+# Pick the wallpaper that matches Noctalia's resolved theme mode (dark/light).
+#
+# Lines are KEY=VALUE. Blank lines and lines starting with # are ignored.
+# Paths may be absolute or start with ~. Surrounding quotes are stripped.
+# This file is read fresh on every switch, so edits apply immediately --
+# no reload needed.
+
+# ---------------------------------------------------------------- required
+# fixed  = one exact image per mode, uses DARK_WALLPAPER / LIGHT_WALLPAPER
+# random = a random image from DARK_DIR / LIGHT_DIR on every switch
+# cycle  = walks DARK_DIR / LIGHT_DIR in order, wrapping, so nothing repeats
+#          until every image has been used once
+STRATEGY = fixed
+
+# ---------------------------------------------------------------- fixed mode
+# STRATEGY = fixed uses these. Only the one matching the active mode is read.
+# Defaults below point at real files in your wallpaper folder -- edit freely.
+#   available: wallhaven-lighthouse.png
+#              wallhaven-ogyo57.jpg
+#              wallhaven-pomo69_1920x1080.png
+#              wallhaven-yqvk1k.png
+LIGHT_WALLPAPER = ~/Pictures/Wallpapers/wallhaven-pomo69_1920x1080.png
+DARK_WALLPAPER  = ~/Pictures/Wallpapers/wallhaven-yqvk1k.png
+
+# ---------------------------------------------------------------- folder modes
+# STRATEGY = random / cycle use these. Only the matching mode's folder is scanned.
+# Only image files sitting directly inside are used -- subfolders are ignored.
+DARK_DIR  = ~/Pictures/Wallpapers/dark
+LIGHT_DIR = ~/Pictures/Wallpapers/light
+
+# ---------------------------------------------------------------- optional
+# Leave empty to apply to every connected output, which keeps them in sync.
+# Set a space-separated list to use a different image per monitor, e.g.:
+# CONNECTORS = eDP-1 HDMI-A-1
+CONNECTORS =
+
+# ------------------------------------------------------------- KDE lock screen
+# On KDE Plasma the lock screen is kscreenlocker_greet. It reads its background
+# from the Greeter group in ~/.config/kscreenlockerrc every time you lock, so the
+# hook just writes that file. Nothing else needs to reload.
+#
+# LOCKSCREEN_SYNC = false disables this entirely and touches nothing.
+LOCKSCREEN_SYNC = true
+
+# desktop = the lock screen shows the same image as the desktop (default).
+#           Free: no extra paths to maintain, and it always agrees.
+# custom  = the lock screen uses its own image per mode, chosen below.
+#           Handy when you want locking to look different from the desktop.
+LOCKSCREEN_SOURCE = desktop
+
+# Only read when LOCKSCREEN_SOURCE = custom. Leave empty to fall back to the
+# desktop wallpaper for that mode, so a half-filled setup still behaves.
+LOCKSCREEN_DARK_WALLPAPER  =
+LOCKSCREEN_LIGHT_WALLPAPER =

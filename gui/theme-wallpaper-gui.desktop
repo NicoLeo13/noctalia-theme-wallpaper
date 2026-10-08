@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Noctalia Theme Wallpaper
+GenericName=Wallpaper settings
+Comment=Choose the wallpaper that follows Noctalia's light and dark theme modes
+Exec=__GUI__
+Icon=preferences-desktop-wallpaper
+Terminal=false
+Categories=Settings;DesktopSettings;GTK;
+StartupNotify=true
+Keywords=wallpaper;theme;dark;light;noctalia;

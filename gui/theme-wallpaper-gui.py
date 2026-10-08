@@ -1,0 +1,739 @@
+#!/usr/bin/env python3
+"""Graphical settings for the Noctalia theme wallpaper switcher.
+
+Edits ~/.config/noctalia/theme-wallpaper.conf, which is the same file the
+theme_mode_changed hook reads. Saving needs no reload, because the hook re-reads
+the file on every switch.
+
+Uses the standard library and the GTK 4 / libadwaita introspection bindings only.
+"""
+
+from __future__ import annotations
+
+import os
+import stat
+import subprocess
+import sys
+import tempfile
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+gi.require_version("Gdk", "4.0")
+gi.require_version("GdkPixbuf", "2.0")
+
+from gi.repository import Adw, Gdk, GdkPixbuf, Gio, GLib, Gtk  # noqa: E402
+
+APP_ID = "dev.local.NoctaliaThemeWallpaper"
+THUMB_SIZE = 190
+MAX_THUMBS = 300
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".jxl", ".avif")
+GRID_COLUMNS = 4  # also the width the empty state spans
+
+# value, combo label, explanation
+STRATEGIES = (
+    ("fixed", "One image per mode", "Uses LIGHT_WALLPAPER and DARK_WALLPAPER."),
+    ("random", "Random from a folder", "Picks a random image from the folder on every switch."),
+    ("cycle", "Cycle a folder", "Walks the folder in order and wraps, so nothing repeats."),
+)
+STRATEGY_VALUES = [v for v, _l, _d in STRATEGIES]
+STRATEGY_LABELS = [l for _v, l, _d in STRATEGIES]
+
+DESKTOP_PAGE = "Desktop wallpaper"
+LOCKSCREEN_PAGE = "KDE lock screen"
+
+
+def config_home() -> str:
+    explicit = os.environ.get("NOCTALIA_CONFIG_HOME")
+    if explicit:
+        return explicit
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    return os.path.join(base, "noctalia")
+
+
+DEFAULT_CONF = os.path.join(config_home(), "theme-wallpaper.conf")
+DEFAULT_HOOK = os.path.join(config_home(), "hooks", "theme-wallpaper.sh")
+
+
+def expand(path: str) -> str:
+    """Match the shell script: a leading ~/ means the home directory."""
+    if path.startswith("~/"):
+        return os.path.join(os.path.expanduser("~"), path[2:])
+    if path == "~":
+        return os.path.expanduser("~")
+    return path
+
+
+def parse_line(line: str) -> tuple[str | None, str | None]:
+    """Read one KEY=VALUE line the same way the shell script reads it."""
+    # ASCII whitespace only, so this matches the shell's [[:space:]] class.
+    # str.strip() would also remove Unicode spaces such as U+00A0.
+    s = line.strip(" \t\r\n\v\f")
+    if not s or s.startswith("#") or "=" not in s:
+        return None, None
+    key, _, value = s.partition("=")
+    key = key.strip()
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    if not key:
+        return None, None
+    return key, value
+
+
+class Config:
+    """A KEY=VALUE file that keeps its comments and key order when saved."""
+
+    def __init__(self, path: str):
+        self.path = path
+        self.lines: list[str] = []
+        self.values: dict[str, str] = {}
+        self.load()
+
+    def load(self) -> None:
+        try:
+            with open(self.path, encoding="utf-8", newline="\n") as fh:
+                # Split on newlines only. str.splitlines() also splits on
+                # \v, \f and several Unicode marks, which the shell reader
+                # does not treat as line breaks, so the two would disagree
+                # and a save would corrupt the file.
+                self.lines = fh.read().split("\n")
+        except OSError:
+            self.lines = []
+        if self.lines and self.lines[-1] == "":
+            self.lines.pop()
+        self.values = {}
+        for line in self.lines:
+            key, value = parse_line(line)
+            if key is not None:
+                self.values[key] = value
+
+    def get(self, key: str, default: str = "") -> str:
+        value = self.values.get(key, "")
+        return value if value else default
+
+    def set(self, key: str, value: str) -> None:
+        # A newline inside a value would become a second line with no "=",
+        # which the reader then drops, silently destroying the setting.
+        if "\n" in value or "\r" in value:
+            raise ValueError(f"refusing to write a newline into {key}")
+        self.values[key] = value
+        out: list[str] = []
+        replaced = False
+        for line in self.lines:
+            existing, _ = parse_line(line)
+            if existing == key:
+                if replaced:
+                    continue  # collapse a duplicated key, the last one wins
+                out.append(f"{key} = {value}")
+                replaced = True
+            else:
+                out.append(line)
+        if not replaced:
+            while out and not out[-1].strip():
+                out.pop()
+            if out:
+                out.append("")
+            out.append(f"{key} = {value}")
+        self.lines = out
+
+    def on_disk(self) -> str:
+        """The raw text currently on disk, or an empty string."""
+        try:
+            with open(self.path, encoding="utf-8", newline="\n") as fh:
+                return fh.read()
+        except OSError:
+            return ""
+
+    def reload_if_changed(self) -> bool:
+        """Re-read when someone edited the file while this window was open.
+
+        The window has no unsaved-state model, because the hook reads the
+        file on every switch. Without this check, a save would overwrite a
+        hand edit made in another editor after the window opened.
+        """
+        current = self.on_disk()
+        if current == self.rendered_text():
+            return False
+        self.load()
+        return True
+
+    def rendered_text(self) -> str:
+        return "\n".join(self.lines) + "\n"
+
+    def save(self) -> None:
+        parent = os.path.dirname(self.path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        try:
+            mode = stat.S_IMODE(os.stat(self.path).st_mode)
+        except OSError:
+            mode = None
+
+        # A unique temporary name, so two windows cannot consume each
+        # other's file. mkstemp creates it with mode 0600 already.
+        fd, tmp = tempfile.mkstemp(dir=parent or ".", prefix=".theme-wallpaper-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(self.rendered_text())
+                fh.flush()
+                # Keep the original mode, so a 0600 file does not become 0644.
+                if mode is not None:
+                    os.fchmod(fh.fileno(), mode)
+        except OSError:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
+        os.replace(tmp, self.path)
+
+
+def scan_images(directory: str) -> list[str]:
+    """Images directly inside a folder, by the same rules as the shell script."""
+    directory = expand(directory.strip())
+    if not directory or not os.path.isdir(directory):
+        return []
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    found: list[str] = []
+    for name in names:
+        if not name.lower().endswith(IMAGE_EXTS):
+            continue
+        full = os.path.join(directory, name)
+        if os.path.isfile(full):
+            found.append(full)
+            if len(found) >= MAX_THUMBS:
+                break
+    return found
+
+
+def make_thumbnail(path: str):
+    try:
+        pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, THUMB_SIZE, THUMB_SIZE, True)
+    except GLib.Error:
+        return None
+    return Gdk.Texture.new_for_pixbuf(pixbuf)
+
+
+def run_hook(hook: str, conf: str, dry_run: bool) -> tuple[int, str]:
+    env = dict(os.environ)
+    env["THEME_WALLPAPER_CONF"] = conf
+    # Set it either way. Copying the environment alone would let an
+    # inherited DRY_RUN=1 turn "Apply now" into a silent no-op.
+    env["THEME_WALLPAPER_DRY_RUN"] = "1" if dry_run else "0"
+    try:
+        done = subprocess.run([hook], capture_output=True, text=True, timeout=60, env=env)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, f"could not run the hook: {exc}"
+    lines = [ln for ln in done.stdout.splitlines() if ln.strip()]
+    if not lines:
+        lines = [ln for ln in done.stderr.splitlines() if ln.strip()]
+    return done.returncode, "\n".join(lines) if lines else "(no output)"
+
+
+def current_theme_mode() -> str:
+    try:
+        done = subprocess.run(
+            ["noctalia", "msg", "theme-mode-get"], capture_output=True, text=True, timeout=15
+        )
+    except (OSError, subprocess.SubprocessError):
+        return "unknown"
+    return done.stdout.strip() or "unknown"
+
+
+class PickerGroup(Adw.PreferencesGroup):
+    """A thumbnail grid plus the image chosen for one mode.
+
+    When mirror is set, the group borrows that group's folder instead of
+    declaring its own, so the two stay in step and there is one source of truth.
+    """
+
+    def __init__(self, title, folder_key, file_key, on_change, mirror=None):
+        super().__init__(title=title)
+        self.folder_key = folder_key
+        self.file_key = file_key
+        self.on_change = on_change
+        self.mirror = mirror
+        self.images: list[str] = []
+        self.selected = ""
+        self.folder_row = None
+
+        if mirror is None:
+            self.folder_row = Adw.EntryRow(title="Folder to browse")
+            self.folder_row.set_show_apply_button(False)
+            browse = Gtk.Button(valign=Gtk.Align.CENTER, icon_name="folder-open-symbolic")
+            browse.set_tooltip_text("Choose the folder to browse")
+            browse.add_css_class("flat")
+            browse.connect("clicked", self._on_browse)
+            self.folder_row.add_suffix(browse)
+            self.add(self.folder_row)
+
+        self.status = Adw.ActionRow()
+        self.add(self.status)
+
+        # A single scrolling row of thumbnails. A wrapped grid looks tidy but
+        # two stacked grids of four columns do not fit a normal window, and the
+        # pictures get squeezed to a fraction of their height. A filmstrip keeps
+        # every thumbnail at full size and scrolls sideways instead.
+        self.grid = Gtk.Grid(
+            column_spacing=8,
+            row_spacing=8,
+            margin_top=6,
+            margin_bottom=6,
+        )
+        self.grid.set_halign(Gtk.Align.START)
+
+        self.scroller = Gtk.ScrolledWindow(
+            hscrollbar_policy=Gtk.PolicyType.AUTOMATIC,
+            vscrollbar_policy=Gtk.PolicyType.NEVER,
+            propagate_natural_width=True,
+            propagate_natural_height=True,
+            min_content_height=THUMB_SIZE + 12,
+        )
+        self.scroller.set_child(self.grid)
+        # An explicit height, because a PreferencesGroup hands its children the
+        # leftover space and will happily squeeze this to nothing, which makes
+        # every thumbnail shrink to a sliver.
+        self.scroller.set_size_request(-1, THUMB_SIZE + 20)
+        self.scroller.set_valign(Gtk.Align.START)
+        self.add(self.scroller)
+
+        # The empty state lives inside the grid, so it occupies the same place
+        # the thumbnails would.
+        self.empty = Adw.StatusPage(
+            icon_name="image-missing-symbolic",
+            title="No images in this folder",
+            description="Add some images, or point the folder somewhere else.",
+        )
+        self.empty.set_size_request(-1, 170)
+        self._next_cell = 0
+        self.grid.attach(self.empty, 0, 0, GRID_COLUMNS, 1)
+
+    # ---------------------------------------------------------------- state
+    def load_from(self, cfg: Config) -> None:
+        if self.folder_row is not None:
+            self.folder_row.set_text(cfg.get(self.folder_key))
+        self.set_file(cfg.get(self.file_key))
+
+    def set_file(self, path: str) -> None:
+        self.selected = expand(path.strip()) if path else ""
+        self.refresh_grid()
+
+    def current_file(self) -> str:
+        return self.selected
+
+    def current_folder(self) -> str:
+        if self.folder_row is not None:
+            return self.folder_row.get_text().strip()
+        if self.mirror is not None:
+            return self.mirror.current_folder()
+        return ""
+
+    # ------------------------------------------------------------ rendering
+    def refresh_grid(self) -> None:
+        while (child := self.grid.get_first_child()) is not None:
+            self.grid.remove(child)
+        self._next_cell = 0
+
+        self.images = scan_images(self.current_folder())
+
+        rendered = 0
+        for path in self.images:
+            texture = make_thumbnail(path)
+            if texture is None:
+                continue
+            button = Gtk.ToggleButton()
+            button.set_child(Gtk.Picture.new_for_paintable(texture))
+            button.set_tooltip_text(path)
+            button.add_css_class("flat")
+            button.set_size_request(THUMB_SIZE, -1)
+            if path == self.selected:
+                button.set_active(True)
+                button.add_css_class("suggested-action")
+            button.connect("clicked", self._on_thumb, path)
+            self.grid.attach(button, self._next_cell, 0, 1, 1)
+            self._next_cell += 1
+            rendered += 1
+
+        self.grid.attach(self.empty, 0, 0, GRID_COLUMNS, 1)
+        # Gate on what was rendered. A folder can list images that all
+        # fail to decode, which would otherwise leave a blank strip and a
+        # misleading "No image selected".
+        self.empty.set_visible(rendered == 0)
+
+        if not self.selected:
+            self.status.set_title("No image selected")
+            self.status.set_subtitle("Type a path above, or pick a thumbnail")
+            return
+        name = os.path.basename(self.selected)
+        if self.selected in self.images:
+            self.status.set_title(name)
+            self.status.set_subtitle(self.selected)
+        else:
+            self.status.set_title(f"{name} (not in this folder)")
+            self.status.set_subtitle(self.selected)
+
+    def _on_thumb(self, _button, path: str) -> None:
+        self.selected = path
+        self.refresh_grid()
+        self.on_change(self)
+
+    def _on_browse(self, _button) -> None:
+        dialog = Gtk.FileDialog(title="Choose a wallpaper folder")
+        start = expand(self.current_folder())
+        if os.path.isdir(start):
+            dialog.set_initial_folder(Gio.File.new_for_path(start))
+        dialog.select_folder(self.get_root(), None, self._on_folder_chosen)
+
+    def _on_folder_chosen(self, source, result) -> None:
+        try:
+            folder = source.select_folder_finish(result)
+        except GLib.Error:
+            return
+        if folder and folder.get_path():
+            self.folder_row.set_text(folder.get_path())
+            self.refresh_grid()
+            # A mirrored group follows the folder it borrows.
+            if self.mirror is not None:
+                self.mirror.refresh_grid()
+            self.on_change(self)
+
+
+class ThemeWallpaperWindow(Adw.ApplicationWindow):
+    def __init__(self, application, conf_path: str, hook_path: str):
+        super().__init__(application=application, title="Noctalia Theme Wallpaper")
+        self.set_default_size(960, 740)
+        self.conf_path = conf_path
+        self.hook_path = hook_path
+        self.cfg = Config(conf_path)
+        self._loading = True
+
+        header = Adw.HeaderBar()
+        open_button = Gtk.Button(label="Open file")
+        open_button.set_tooltip_text(f"Edit {conf_path} in your text editor")
+        open_button.connect("clicked", self._on_open_file)
+        header.pack_start(open_button)
+
+        self.desktop_content = Adw.PreferencesPage()
+        self.lock_content = Adw.PreferencesPage()
+
+        # A TabView with its own bar, because a bare ViewStack shows no way to
+        # reach the second page. append() wraps each child in an AdwTabPage,
+        # and that page's title is what the tab bar shows, so set it here
+        # rather than on the PreferencesPage.
+        self.tabs = Adw.TabView()
+        self.tabs.append(self.desktop_content)
+        self.tabs.append(self.lock_content)
+        for page, title, icon in (
+            (self.tabs.get_nth_page(0), DESKTOP_PAGE, "preferences-desktop-wallpaper-symbolic"),
+            (self.tabs.get_nth_page(1), LOCKSCREEN_PAGE, "system-lock-screen-symbolic"),
+        ):
+            page.set_title(title)
+            page.set_icon(Gio.ThemedIcon.new(icon))
+
+        footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, margin_top=6,
+                         margin_bottom=6, margin_start=12, margin_end=12)
+        self.apply_button = Gtk.Button(label="Apply now", tooltip_text="Run the hook for the current mode")
+        self.apply_button.add_css_class("suggested-action")
+        self.apply_button.connect("clicked", lambda _b: self._apply(False))
+        self.dry_button = Gtk.Button(label="Dry run", tooltip_text="Show what would change, change nothing")
+        self.dry_button.connect("clicked", lambda _b: self._apply(True))
+        footer.append(self.apply_button)
+        footer.append(self.dry_button)
+
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        content.append(self.tabs)
+        content.append(footer)
+
+        self.toasts = Adw.ToastOverlay(child=content)
+        toolbar = Adw.ToolbarView(content=self.toasts)
+        toolbar.add_top_bar(header)
+        toolbar.add_top_bar(Adw.TabBar(view=self.tabs, autohide=False))
+        self.set_content(toolbar)
+
+        self._build_desktop_page()
+        self._build_lockscreen_page()
+
+        self._loading = False
+
+    # ------------------------------------------------------------- desktop
+    def _build_desktop_page(self) -> None:
+        page = self.desktop_content
+
+        # A PreferencesPage only accepts groups, so the loose rows go in one.
+        top = Adw.PreferencesGroup()
+        page.add(top)
+
+        self.strategy_row = Adw.ComboRow(
+            title="How to choose", model=Gtk.StringList.new(STRATEGY_LABELS)
+        )
+        self.strategy_row.connect("notify::selected", self._on_strategy_changed)
+        top.add(self.strategy_row)
+
+        self.strategy_desc = Adw.ActionRow()
+        top.add(self.strategy_desc)
+
+        self.pickers: list[PickerGroup] = []
+        for title, folder_key, file_key in (
+            ("Light mode", "LIGHT_DIR", "LIGHT_WALLPAPER"),
+            ("Dark mode", "DARK_DIR", "DARK_WALLPAPER"),
+        ):
+            picker = PickerGroup(title, folder_key, file_key, self._on_change)
+            page.add(picker)
+            self.pickers.append(picker)
+
+        bottom = Adw.PreferencesGroup()
+        page.add(bottom)
+        self.mode_row = Adw.ActionRow(title="Checking the current theme mode")
+        bottom.add(self.mode_row)
+        page.set_vexpand(True)
+
+    # ---------------------------------------------------------- lockscreen
+    def _build_lockscreen_page(self) -> None:
+        page = self.lock_content
+
+        top = Adw.PreferencesGroup()
+        page.add(top)
+
+        self.lock_sync = Adw.SwitchRow(
+            title="Keep the lock screen in sync",
+            subtitle="Write the image into the KDE lock screen settings on every switch",
+        )
+        self.lock_sync.connect("notify::active", self._on_lock_changed)
+        top.add(self.lock_sync)
+
+        self.lock_source = Adw.ComboRow(
+            title="Lock screen image",
+            model=Gtk.StringList.new(["Match the desktop wallpaper", "Use a different image"]),
+        )
+        self.lock_source.connect("notify::selected", self._on_lock_changed)
+        top.add(self.lock_source)
+
+        self.lock_desc = Adw.ActionRow()
+        top.add(self.lock_desc)
+
+        self.lock_pickers: list[PickerGroup] = []
+        for title, file_key, mirror in (
+            ("Light mode lock screen", "LOCKSCREEN_LIGHT_WALLPAPER", self.pickers[0]),
+            ("Dark mode lock screen", "LOCKSCREEN_DARK_WALLPAPER", self.pickers[1]),
+        ):
+            picker = PickerGroup(title, None, file_key, self._on_change, mirror=mirror)
+            page.add(picker)
+            self.lock_pickers.append(picker)
+        page.set_vexpand(True)
+
+    # -------------------------------------------------------------- loading
+    def load_config(self) -> None:
+        self._loading = True
+        self.cfg.load()
+
+        strategy = self.cfg.get("STRATEGY", "fixed").strip().lower()
+        index = STRATEGY_VALUES.index(strategy) if strategy in STRATEGY_VALUES else 0
+        self.strategy_row.set_selected(index)
+
+        for picker in self.pickers + self.lock_pickers:
+            picker.load_from(self.cfg)
+
+        self.lock_sync.set_active(self.cfg.get("LOCKSCREEN_SYNC", "true") != "false")
+        self.lock_source.set_selected(
+            0 if self.cfg.get("LOCKSCREEN_SOURCE", "desktop").strip().lower() == "desktop" else 1
+        )
+
+        self._loading = False
+        self._update_visibility()
+        self._update_mode_label()
+
+    def _strategy(self) -> str:
+        index = self.strategy_row.get_selected()
+        return STRATEGY_VALUES[index] if 0 <= index < len(STRATEGY_VALUES) else "fixed"
+
+    def _update_visibility(self) -> None:
+        strategy = self._strategy()
+        folder_mode = strategy in ("random", "cycle")
+
+        for value, _label, desc in STRATEGIES:
+            if value == strategy:
+                self.strategy_desc.set_title(desc)
+                break
+
+        for picker in self.pickers:
+            if picker.folder_row is None:
+                continue
+            if folder_mode:
+                picker.folder_row.set_title("Folder this mode picks from")
+                picker.folder_row.set_tooltip_text("Saved as LIGHT_DIR or DARK_DIR")
+            else:
+                picker.folder_row.set_title("Folder to browse")
+                picker.folder_row.set_tooltip_text("Not saved unless the strategy uses a folder")
+
+        lock_on = self.lock_sync.get_active()
+        custom = self.lock_source.get_selected() == 1
+        self.lock_source.set_sensitive(lock_on)
+        self.lock_desc.set_sensitive(lock_on)
+        if not lock_on:
+            self.lock_desc.set_title("The lock screen is left untouched")
+        elif custom:
+            self.lock_desc.set_title("Each mode uses its own lock screen image")
+        else:
+            self.lock_desc.set_title("The lock screen mirrors the desktop wallpaper")
+        for picker in self.lock_pickers:
+            picker.set_visible(lock_on and custom)
+
+    # --------------------------------------------------------------- events
+    def _on_strategy_changed(self, *_args) -> None:
+        self._update_visibility()
+        if not self._loading:
+            self.save_config(silent=True)
+
+    def _on_lock_changed(self, *_args) -> None:
+        # Switching to a separate lock screen image starts from the desktop
+        # choice, so the two pages do not open in a half-empty state.
+        if self.lock_source.get_selected() == 1:
+            for lock_picker, desktop_picker in zip(self.lock_pickers, self.pickers):
+                if not lock_picker.current_file() and desktop_picker.current_file():
+                    lock_picker.set_file(desktop_picker.current_file())
+        if not self._loading:
+            self.save_config(silent=True)
+        self._update_visibility()
+
+    def _on_change(self, _picker) -> None:
+        if self._loading:
+            return
+        # Someone may have edited the file in another editor while this
+        # window was open. Re-read first so their edit survives.
+        if self.cfg.reload_if_changed():
+            self.load_config()
+            return
+        self.save_config(silent=True)
+
+    def _on_open_file(self, _button) -> None:
+        uri = GLib.filename_to_uri(os.path.abspath(self.conf_path), None)
+        try:
+            Gio.AppInfo.launch_default_for_uri(uri, None)
+        except GLib.Error:
+            self.toasts.add_toast(Adw.Toast.new(f"Path: {self.conf_path}"))
+
+    def _update_mode_label(self) -> None:
+        mode = current_theme_mode()
+        if mode in ("light", "dark"):
+            self.mode_row.set_title(f"Noctalia is currently in {mode}")
+            self.mode_row.set_subtitle("Apply now sets the wallpaper for that mode")
+        else:
+            self.mode_row.set_title(f"Noctalia reports mode {mode}")
+            self.mode_row.set_subtitle("The hook needs light or dark to pick an image")
+        self._sync_color_scheme(mode)
+
+    def _sync_color_scheme(self, mode: str) -> None:
+        """Follow Noctalia's mode, so the window matches the desktop it configures.
+
+        AdwStyleManager is the supported route. Setting the old GtkSettings
+        prefer-dark-theme key is unsupported under libadwaita and warns.
+        """
+        manager = Adw.StyleManager.get_default()
+        if mode == "dark":
+            manager.set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+        elif mode == "light":
+            manager.set_color_scheme(Adw.ColorScheme.FORCE_LIGHT)
+        else:
+            manager.set_color_scheme(Adw.ColorScheme.DEFAULT)
+
+    # --------------------------------------------------------------- saving
+    def save_config(self, silent: bool = False) -> None:
+        if not self._loading and self.cfg.reload_if_changed():
+            self.load_config()
+            return
+        strategy = self._strategy()
+        self.cfg.set("STRATEGY", strategy)
+
+        for picker in self.pickers:
+            if strategy in ("random", "cycle"):
+                self.cfg.set(picker.folder_key, picker.current_folder())
+            self.cfg.set(picker.file_key, picker.current_file())
+
+        lock_on = self.lock_sync.get_active()
+        custom = self.lock_source.get_selected() == 1
+        self.cfg.set("LOCKSCREEN_SYNC", "true" if lock_on else "false")
+        self.cfg.set("LOCKSCREEN_SOURCE", "custom" if custom else "desktop")
+        for picker in self.lock_pickers:
+            if lock_on and custom:
+                self.cfg.set(picker.file_key, picker.current_file())
+
+        try:
+            self.cfg.save()
+        except OSError as exc:
+            self.toasts.add_toast(Adw.Toast.new(f"Could not save: {exc}"))
+            return
+        if not silent:
+            self.toasts.add_toast(Adw.Toast.new(f"Saved to {self.conf_path}"))
+
+    # -------------------------------------------------------------- actions
+    def _apply(self, dry_run: bool) -> None:
+        self.save_config(silent=True)
+        if not os.path.isfile(self.hook_path):
+            self.toasts.add_toast(Adw.Toast.new(f"Hook not found: {self.hook_path}"))
+            return
+        self._update_mode_label()
+        code, output = run_hook(self.hook_path, self.conf_path, dry_run)
+        if dry_run:
+            self.toasts.add_toast(Adw.Toast.new("Dry run finished"))
+        elif code == 0:
+            self.toasts.add_toast(Adw.Toast.new("Wallpaper applied"))
+        else:
+            self.toasts.add_toast(Adw.Toast.new("The hook reported a problem"))
+        self._show_output(output, error=(code != 0 and not dry_run))
+
+    def _show_output(self, text: str, error: bool = False) -> None:
+        dialog = Adw.Window(title="Hook output", modal=True, transient_for=self)
+        box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL,
+            spacing=12,
+            margin_top=18,
+            margin_bottom=18,
+            margin_start=18,
+            margin_end=18,
+        )
+
+        view = Gtk.TextView(editable=False, monospace=True, wrap_mode=Gtk.WrapMode.WORD_CHAR)
+        view.get_buffer().set_text(text)
+        if error:
+            view.add_css_class("error")
+        box.append(Gtk.ScrolledWindow(vexpand=True, min_content_height=260, child=view))
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8, halign=Gtk.Align.END)
+        copy_button = Gtk.Button(label="Copy")
+        copy_button.connect("clicked", lambda _b: view.get_clipboard().set(text))
+        close_button = Gtk.Button(label="Close")
+        close_button.add_css_class("suggested-action")
+        close_button.connect("clicked", lambda _b: dialog.close())
+        buttons.append(copy_button)
+        buttons.append(close_button)
+        box.append(buttons)
+
+        dialog.set_content(box)
+        dialog.present()
+
+
+class ThemeWallpaperApp(Adw.Application):
+    def __init__(self, conf_path: str, hook_path: str):
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.NON_UNIQUE)
+        self.conf_path = conf_path
+        self.hook_path = hook_path
+
+    def do_activate(self) -> None:
+        window = ThemeWallpaperWindow(self, self.conf_path, self.hook_path)
+        window.load_config()
+        window.present()
+
+
+def main() -> int:
+    conf_path = os.environ.get("THEME_WALLPAPER_CONF", DEFAULT_CONF)
+    hook_path = os.environ.get("THEME_WALLPAPER_HOOK", DEFAULT_HOOK)
+    return ThemeWallpaperApp(conf_path, hook_path).run(sys.argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

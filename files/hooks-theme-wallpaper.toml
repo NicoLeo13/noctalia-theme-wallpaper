@@ -1,0 +1,20 @@
+# Noctalia hooks for theme-wallpaper.sh
+#
+# Kept in its own file so it merges cleanly with the rest of the Noctalia
+# config stack without editing any existing *.toml.
+#
+# theme_mode_changed -> fires whenever the resolved mode flips dark <-> light,
+#   including the automatic flip at sunrise/sunset when [theme].mode = "auto".
+#   The env var NOCTALIA_THEME_MODE holds the new mode.
+#
+# started -> covers the one case the hook above cannot: Noctalia starting up
+#   already in a given mode. Without it the wallpaper is only applied after the
+#   first actual mode change, so the first session of the day would keep whatever
+#   was set last. The env var is empty there, so the script asks Noctalia instead.
+#
+# install.sh replaces __SCRIPT__ with the absolute path of the installed script,
+# so the hook does not depend on the shell expanding a home-directory variable.
+
+[hooks]
+theme_mode_changed = "__SCRIPT__"
+started = "__SCRIPT__"

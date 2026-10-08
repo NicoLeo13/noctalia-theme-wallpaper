@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Never commit a filled-in settings file. The shipped template is
+# files/theme-wallpaper.conf.example. A real one holds your home paths and
+# image names, and ~/.config/noctalia/theme-wallpaper.conf is the live copy.
+/theme-wallpaper.conf
+theme-wallpaper.conf.local
+*.local.conf
+
+# Never commit a generated lock-screen or wallpaper state file.
+kscreenlockerrc
+*.state
+
+# Screenshots of a running session. These capture the desktop, so they leak
+# whatever was on screen. Only commit screenshots you made deliberately from a
+# clean state, and put them in docs/images/ so this rule cannot hide them.
+/screenshot*.png
+/screenshots/
+*.screenshot.png
+
+# Editors and tools
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Local scratch
+/tmp/
+*.log
