@@ -100,6 +100,12 @@ and `PreviewImage=` keys in place.
 Because `kscreenlocker_greet` starts fresh each time the screen locks, writing the
 file before a lock is enough. No reload and no extra process is involved.
 
+The lock screen follows **every** wallpaper change, not only a theme mode
+change. The hook listens for Noctalia's `wallpaper_changed` event, so picking a
+new wallpaper in the Noctalia panel, with a plugin, or with another tool all
+update the lock screen too. When the wallpaper was changed by something else,
+the hook reconciles the lock screen and leaves the desktop wallpaper alone.
+
 `LOCKSCREEN_SOURCE` chooses the behavior:
 
 - `desktop` (default) — the lock screen shows the same image as the desktop. There
@@ -157,6 +163,16 @@ reload and its transition flash.
 **Reconciled, not short-circuited.** The desktop wallpaper and the lock screen
 are two separate states that can drift apart, so the lock screen step runs even
 when the desktop image is already applied and nothing needed changing.
+
+**The lock screen write is a no-op when nothing changed.** If the file already
+points at the right image, the hook leaves it completely alone. Rewriting an
+identical file would give it a new inode, and that is what breaks the file watch
+a desktop uses to notice a theme change.
+
+**The hook listens for three events.** `theme_mode_changed` picks and applies
+the image. `started` covers a session that boots already in a given mode.
+`wallpaper_changed` covers a wallpaper change made by anything else, and it only
+reconciles the lock screen so the script never changes the wallpaper back.
 
 **Palette synergy.** Your `[theme].source = "wallpaper"` means Noctalia
 regenerates the palette from the current wallpaper on every change. So the

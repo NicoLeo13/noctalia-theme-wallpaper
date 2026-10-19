@@ -105,73 +105,6 @@ fi
 strategy="$(cfg STRATEGY fixed)"
 strategy="${strategy,,}"
 
-# ---------------------------------------------------------------- pick wallpaper
-chosen=""
-index_state=""
-images=()
-outputs=()
-keep=()
-img=""
-
-case "$strategy" in
-fixed)
-	chosen="$(cfg "$file_key" "")"
-	[[ -n "$chosen" ]] || bail "fixed: $file_key is not set"
-	chosen="$(expand "$chosen")"
-	;;
-
-random | cycle)
-	dir="$(cfg "$dir_key" "")"
-	[[ -n "$dir" ]] || bail "$strategy: $dir_key is not set"
-	dir="$(expand "$dir")"
-	[[ -d "$dir" ]] || bail "$strategy: not a directory: $dir"
-
-	# Deterministic order so `cycle` is stable across invocations.
-	# -print0 and sort -z, because a file name may contain a newline and
-	# a line-based pipeline would split one file into two fake entries.
-	# -type f -o -type l keeps symlinked wallpapers, which a dotfiles setup
-	# relies on. Broken symlinks are filtered out by the test below.
-	mapfile -d '' -t images < <(
-		find "$dir" -maxdepth 1 \( -type f -o -type l \) \
-			\( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \
-			-o -iname '*.webp' -o -iname '*.jxl' -o -iname '*.avif' \) -print0 2>/dev/null |
-			LC_ALL=C sort -z
-	)
-	# Drop anything that does not resolve to a readable file.
-	keep=()
-	for img in ${images[@]+"${images[@]}"}; do
-		[[ -f "$img" && -r "$img" ]] && keep+=("$img")
-	done
-	images=(${keep[@]+"${keep[@]}"})
-	[[ ${#images[@]} -gt 0 ]] || bail "$strategy: no images in $dir"
-
-	if [[ "$strategy" == "random" ]]; then
-		chosen="${images[RANDOM % ${#images[@]}]}"
-	else
-		# cycle: advance through the folder, wrapping, so no repeat until the end
-		index_state="$STATE_DIR/theme-wallpaper-$mode.idx"
-		mkdir -p "$STATE_DIR" 2>/dev/null || true
-		last="-1"
-		if [[ -r "$index_state" ]]; then
-			read -r last <"$index_state" || last="-1"
-		fi
-		[[ "$last" =~ ^-?[0-9]+$ ]] || last="-1"
-		idx=$(((last + 1) % ${#images[@]}))
-		if ! printf '%s\n' "$idx" >"$index_state" 2>/dev/null; then
-			log "cycle: cannot write $index_state, so the order will not advance"
-		fi
-		chosen="${images[$idx]}"
-	fi
-	;;
-
-*)
-	bail "unknown STRATEGY '${strategy}' (use fixed, random, or cycle)"
-	;;
-esac
-
-[[ -n "$chosen" && -f "$chosen" ]] || bail "chosen wallpaper is not a readable file: ${chosen:-empty}"
-[[ -r "$chosen" ]] || bail "chosen wallpaper is not readable: $chosen"
-
 # ------------------------------------------------------------ KDE lock screen
 # kscreenlocker_greet reads its background from the Greeter group in
 # kscreenlockerrc every time the screen locks, so writing the file before a lock
@@ -298,6 +231,14 @@ set_lockscreen_image() {
 		return 0
 	fi
 
+	# Nothing to do when the file already says the right thing. Rewriting an
+	# identical file replaces the inode, and that is what breaks the file
+	# watch a desktop uses to notice a theme change.
+	if [[ "$(printf '%s\n' "${new[@]}")" == "$(printf '%s\n' "${lines[@]}")" ]]; then
+		log "lockscreen: already set -> $(basename "$image")"
+		return 0
+	fi
+
 	perms="$(stat -Lc '%a' -- "$target" 2>/dev/null || echo 600)"
 	if ! mv -f -- "$tmp" "$target"; then
 		rm -f "$tmp"
@@ -351,6 +292,86 @@ sync_lockscreen() {
 
 	set_lockscreen_image "$lock_image"
 }
+
+# ------------------------------------------------------- wallpaper changed event
+# Noctalia fires wallpaper_changed whenever the wallpaper is changed, by the
+# wallpaper panel, a plugin, or by this script. When something else changed it,
+# the desktop wallpaper is already correct and must not be changed back. Only
+# the lock screen needs reconciling, against the wallpaper that is on screen.
+if [[ -n "${NOCTALIA_WALLPAPER_PATH:-}" ]]; then
+	current="$(noctalia msg wallpaper-get 2>/dev/null | head -1 | tr -d '[:space:]')"
+	[[ -n "$current" ]] || bail "wallpaper_changed: could not read the current wallpaper"
+	log "wallpaper changed elsewhere: keeping $(basename "$current")"
+	sync_lockscreen "$mode" "$current"
+	exit 0
+fi
+
+# ---------------------------------------------------------------- pick wallpaper
+chosen=""
+index_state=""
+images=()
+outputs=()
+keep=()
+img=""
+
+case "$strategy" in
+fixed)
+	chosen="$(cfg "$file_key" "")"
+	[[ -n "$chosen" ]] || bail "fixed: $file_key is not set"
+	chosen="$(expand "$chosen")"
+	;;
+
+random | cycle)
+	dir="$(cfg "$dir_key" "")"
+	[[ -n "$dir" ]] || bail "$strategy: $dir_key is not set"
+	dir="$(expand "$dir")"
+	[[ -d "$dir" ]] || bail "$strategy: not a directory: $dir"
+
+	# Deterministic order so `cycle` is stable across invocations.
+	# -print0 and sort -z, because a file name may contain a newline and
+	# a line-based pipeline would split one file into two fake entries.
+	# -type f -o -type l keeps symlinked wallpapers, which a dotfiles setup
+	# relies on. Broken symlinks are filtered out by the test below.
+	mapfile -d '' -t images < <(
+		find "$dir" -maxdepth 1 \( -type f -o -type l \) \
+			\( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' \
+			-o -iname '*.webp' -o -iname '*.jxl' -o -iname '*.avif' \) -print0 2>/dev/null |
+			LC_ALL=C sort -z
+	)
+	# Drop anything that does not resolve to a readable file.
+	keep=()
+	for img in ${images[@]+"${images[@]}"}; do
+		[[ -f "$img" && -r "$img" ]] && keep+=("$img")
+	done
+	images=(${keep[@]+"${keep[@]}"})
+	[[ ${#images[@]} -gt 0 ]] || bail "$strategy: no images in $dir"
+
+	if [[ "$strategy" == "random" ]]; then
+		chosen="${images[RANDOM % ${#images[@]}]}"
+	else
+		# cycle: advance through the folder, wrapping, so no repeat until the end
+		index_state="$STATE_DIR/theme-wallpaper-$mode.idx"
+		mkdir -p "$STATE_DIR" 2>/dev/null || true
+		last="-1"
+		if [[ -r "$index_state" ]]; then
+			read -r last <"$index_state" || last="-1"
+		fi
+		[[ "$last" =~ ^-?[0-9]+$ ]] || last="-1"
+		idx=$(((last + 1) % ${#images[@]}))
+		if ! printf '%s\n' "$idx" >"$index_state" 2>/dev/null; then
+			log "cycle: cannot write $index_state, so the order will not advance"
+		fi
+		chosen="${images[$idx]}"
+	fi
+	;;
+
+*)
+	bail "unknown STRATEGY '${strategy}' (use fixed, random, or cycle)"
+	;;
+esac
+
+[[ -n "$chosen" && -f "$chosen" ]] || bail "chosen wallpaper is not a readable file: ${chosen:-empty}"
+[[ -r "$chosen" ]] || bail "chosen wallpaper is not readable: $chosen"
 
 # ---------------------------------------------------------------- apply
 # The desktop wallpaper is skipped when it is already applied, but the lock
