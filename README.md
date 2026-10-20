@@ -126,6 +126,39 @@ wallpaper per output, which this hook already switches. Note that enabling
 `[lockscreen]` hands session locking to Noctalia, and its blurred-desktop
 background needs screencopy, which KWin does not provide.
 
+## Palette
+
+The tool can draw the colour palette from the wallpaper as well, so the whole
+desktop shares one set of colours.
+
+```toml
+PALETTE_GENERATOR = noctalia   # noctalia | ours | random
+PALETTE_SCHEME = m3-rainbow    # used when the generator is noctalia
+PALETTE_VARIANT = duotone      # duotone | tonal
+PALETTE_SEED = 0               # for the random generator
+```
+
+| Generator | What it does |
+| --- | --- |
+| `noctalia` | Noctalia draws the palette, with the scheme named in `PALETTE_SCHEME`. The tool does not touch the palette. |
+| `ours` | The tool draws a palette from the wallpaper and applies it as a Noctalia custom palette. |
+| `random` | The same, but the accent colours move around the hue of the wallpaper, so each wallpaper still feels like itself. |
+
+`PALETTE_VARIANT` decides how the two modes relate to the picture. `duotone`
+keeps the picture's real hues, with light washed out and dark deep. `tonal` uses
+one seed hue for all three accents, the way Noctalia's own schemes do.
+
+The palette is a pure function of the wallpaper, so one file is enough. The file
+holds a dark and a light variant, so a theme mode change needs no regeneration
+at all. The generator guarantees the contrast of every colour pair it supplies
+and refuses to write a palette that fails its own check, so a broken palette
+never reaches the desktop.
+
+Setting `PALETTE_GENERATOR = noctalia` hands the palette back to Noctalia
+completely. That is also the ownership switch. While the generator is `ours` or
+`random` the tool owns the palette source, and a change made in Noctalia's own
+settings lasts only until the next wallpaper change.
+
 ## Design notes
 
 **Why a hook and not a Luau plugin.** Noctalia plugins run as Luau services, and

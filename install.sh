@@ -45,6 +45,7 @@ if (Gtk.get_major_version(), Gtk.get_minor_version()) < (4, 10):
 
 uninstall() {
 	rm -f "$HOOKS_TOML" "$DESKTOP_FILE" "$GUI" "$SCRIPT"
+	rm -f "$HOOKS_DIR/palette-generator.py"
 	if [[ -f "$CONF" ]] && grep -q "installed by the theme-wallpaper switcher" "$CONF"; then
 		rm -f "$CONF"
 		printf 'removed config: %s\n' "$CONF"
@@ -67,9 +68,13 @@ command -v noctalia >/dev/null 2>&1 || die "noctalia not found on PATH"
 
 # Validate before installing, so a broken script never reaches the hooks file.
 bash -n "$FILES/theme-wallpaper.sh" || die "the hook script has a syntax error"
+python3 -m py_compile "$FILES/palette-generator.py" ||
+	die "the palette generator has a syntax error"
 
 mkdir -p "$HOOKS_DIR" || die "cannot create $HOOKS_DIR"
 install -m 0755 "$FILES/theme-wallpaper.sh" "$SCRIPT" || die "cannot install script"
+install -m 0755 "$FILES/palette-generator.py" "$HOOKS_DIR/palette-generator.py" ||
+	die "cannot install the palette generator"
 
 # Write the absolute script path into the hooks file rather than shipping a
 # template with $HOME, so the hook cannot depend on Noctalia running it through

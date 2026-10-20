@@ -15,6 +15,8 @@
 set -uo pipefail
 
 CONF="${THEME_WALLPAPER_CONF:-$HOME/.config/noctalia/theme-wallpaper.conf}"
+# Noctalia keeps its custom palettes next to this file, in a "palettes" folder.
+PALETTE_DIR="${THEME_WALLPAPER_PALETTE_DIR:-$(dirname -- "$CONF")/palettes}"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/noctalia"
 LOG_TAG="noctalia-theme-wallpaper"
 DRY_RUN="${THEME_WALLPAPER_DRY_RUN:-0}"
@@ -293,6 +295,61 @@ sync_lockscreen() {
 	set_lockscreen_image "$lock_image"
 }
 
+# ------------------------------------------------------------------- palette
+# The palette is a pure function of the wallpaper, so one file is enough: going
+# back to a wallpaper regenerates the same palette it had before. A file per
+# wallpaper would only accumulate, and the random strategy would create a new
+# one on every switch.
+#
+# The file holds a dark and a light variant, so a theme mode change needs no
+# regeneration at all. Noctalia picks the variant that matches the mode.
+sync_palette() {
+	local wallpaper="$1" generator variant seed name out generator_script output scheme
+
+	generator="$(cfg PALETTE_GENERATOR noctalia)"
+	case "$generator" in
+	noctalia)
+		# Noctalia owns the palette. Hand the source back to it so the
+		# wallpaper and its own scheme apply again.
+		scheme="$(cfg PALETTE_SCHEME m3-rainbow)"
+		if noctalia msg color-scheme-set wallpaper "$scheme" >/dev/null 2>&1; then
+			log "palette: Noctalia owns it (scheme $scheme)"
+		else
+			log "palette: could not hand the palette back to Noctalia"
+		fi
+		return 0
+		;;
+	ours | random) ;;
+	*) log "palette: unknown PALETTE_GENERATOR '${generator}' (skipped)"; return 0 ;;
+	esac
+
+	generator_script="${BASH_SOURCE[0]%/*}/palette-generator.py"
+	if [[ ! -f "$generator_script" ]]; then
+		log "palette: generator not found at $generator_script (skipped)"
+		return 0
+	fi
+
+	variant="$(cfg PALETTE_VARIANT duotone)"
+	seed="$(cfg PALETTE_SEED 0)"
+	name="ours"
+	[[ "$generator" == "random" ]] && name="ours-random"
+	out="$PALETTE_DIR/$name.json"
+
+	local -a args=(--wallpaper "$wallpaper" --output "$out" --variant "$variant" --seed "$seed")
+	[[ "$generator" == "random" ]] && args+=(--random)
+
+	if ! output="$(python3 "$generator_script" "${args[@]}" 2>&1)"; then
+		log "palette: generation failed, keeping the current palette: $output"
+		return 0
+	fi
+
+	if ! noctalia msg color-scheme-set custom "$name" >/dev/null 2>&1; then
+		log "palette: could not apply $name (skipped)"
+		return 0
+	fi
+	log "palette: applied $name from $(basename "$wallpaper")"
+}
+
 # ------------------------------------------------------- wallpaper changed event
 # Noctalia fires wallpaper_changed whenever the wallpaper is changed, by the
 # wallpaper panel, a plugin, or by this script. When something else changed it,
@@ -303,6 +360,7 @@ if [[ -n "${NOCTALIA_WALLPAPER_PATH:-}" ]]; then
 	[[ -n "$current" ]] || bail "wallpaper_changed: could not read the current wallpaper"
 	log "wallpaper changed elsewhere: keeping $(basename "$current")"
 	sync_lockscreen "$mode" "$current"
+	sync_palette "$current"
 	exit 0
 fi
 

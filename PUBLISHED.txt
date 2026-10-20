@@ -1,4 +1,4 @@
 
 published from the private repository.
-files: 11
+files: 12
 verify: re-run tools/publish-public.sh and compare the hashes

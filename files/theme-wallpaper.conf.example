@@ -53,3 +53,32 @@ LOCKSCREEN_SOURCE = desktop
 # desktop wallpaper for that mode, so a half-filled setup still behaves.
 LOCKSCREEN_DARK_WALLPAPER  =
 LOCKSCREEN_LIGHT_WALLPAPER =
+# ------------------------------------------------------------------- palette
+# Who generates the colour palette.
+#
+# noctalia -> Noctalia generates it from the wallpaper, with the scheme named in
+#             PALETTE_SCHEME. The tool does not touch the palette, so the
+#             wallpaper and Noctalia's own scheme apply.
+# ours     -> this tool generates a palette from the wallpaper and applies it as
+#             a Noctalia custom palette.
+# random   -> the same, but the accent colours are randomised around the hue of
+#             the wallpaper, so each wallpaper still feels like itself.
+#
+# Setting this to noctalia hands the palette back to Noctalia completely.
+PALETTE_GENERATOR = noctalia
+
+# The scheme Noctalia uses when PALETTE_GENERATOR = noctalia.
+PALETTE_SCHEME = m3-rainbow
+
+# How the two modes relate to the wallpaper, used when PALETTE_GENERATOR is
+# ours or random.
+#
+# duotone -> the image's real hues are kept. Light is washed out and high key,
+#            dark is deep and saturated.
+# tonal   -> one seed hue for all three accents, the way Noctalia's own
+#            schemes work.
+PALETTE_VARIANT = duotone
+
+# The seed for the random generator. The same seed and the same wallpaper always
+# give the same palette. Change it to get a different one.
+PALETTE_SEED = 0
