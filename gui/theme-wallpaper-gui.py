@@ -15,6 +15,7 @@ import json
 import os
 import stat
 import subprocess
+import tomllib
 import sys
 import tempfile
 
@@ -637,6 +638,7 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         self._preview: dict = {}
         self._candidate: dict = {}
         self._generated_for = ""
+        self._configured_mode_cache = ""
         self._mine_rows: list = []
         self._all_rows: list = []
         self._dots: list = []
@@ -702,6 +704,14 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
 
         now = Adw.PreferencesGroup(title="Right now")
         page.add(now)
+        self.mode_row = Adw.ActionRow(title="The theme mode")
+        self.mode_button = Gtk.Button(label="Follow the day and night")
+        self.mode_button.set_valign(Gtk.Align.CENTER)
+        self.mode_button.add_css_class("suggested-action")
+        self.mode_button.connect("clicked", lambda _b: self._restore_schedule())
+        self.mode_row.add_suffix(self.mode_button)
+        now.add(self.mode_row)
+
         self.now_row = Adw.ActionRow(title="The wallpaper on screen")
         self.now_picture = Gtk.Picture()
         self.now_picture.set_size_request(110, 62)
@@ -925,8 +935,39 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             pass
         return True
 
+    def _restore_schedule(self) -> None:
+        """Put the mode back to auto, so the day and night schedule works."""
+        try:
+            done = subprocess.run(
+                ["noctalia", "msg", "theme-mode-set", "auto"],
+                capture_output=True, text=True, timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.toasts.add_toast(Adw.Toast.new(f"Could not set the mode: {exc}"))
+            return
+        if done.returncode == 0:
+            self.toasts.add_toast(Adw.Toast.new("The theme follows the day and night again"))
+            self._refresh_now()
+        else:
+            self.toasts.add_toast(Adw.Toast.new("Noctalia would not take that"))
+
     def _refresh_now(self) -> None:
         """Show what the desktop is showing, on both tabs."""
+        configured = self._configured_mode()
+        if configured in ("dark", "light"):
+            self.mode_row.set_title("The theme mode is pinned")
+            self.mode_row.set_subtitle(
+                f"It is set to {configured}, so the day and night schedule never runs"
+            )
+            self.mode_button.set_visible(True)
+        elif configured == "auto":
+            self.mode_row.set_title("The theme mode")
+            self.mode_row.set_subtitle("It follows the day and night")
+            self.mode_button.set_visible(False)
+        else:
+            self.mode_row.set_title("The theme mode")
+            self.mode_row.set_subtitle("It could not be read just now")
+            self.mode_button.set_visible(False)
         wallpaper = self._current_wallpaper()
         self.now_row.set_title("The wallpaper on screen")
         self.now_row.set_subtitle(os.path.basename(wallpaper) if wallpaper else "Nothing yet")
@@ -950,6 +991,26 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         # worth marking in the pickers.
         for picker in self.pickers:
             picker.set_current(wallpaper)
+
+    def _configured_mode(self) -> str:
+        """The mode Noctalia is set to, which is not always the mode it shows.
+
+        The mode in the settings can be dark or light, and then the day and
+        night schedule never runs. The mode that Noctalia reports is the one
+        it resolved, so the setting has to be read from the config.
+        """
+        try:
+            done = subprocess.run(
+                ["noctalia", "config", "export"], capture_output=True, text=True, timeout=20
+            )
+            data = tomllib.loads(done.stdout)
+            mode = str(data.get("theme", {}).get("mode", ""))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            # Keep the last known value rather than blanking the row.
+            return self._configured_mode_cache
+        if mode:
+            self._configured_mode_cache = mode
+        return mode
 
     def _current_lock_screen(self) -> str:
         """The image the KDE lock screen shows right now.

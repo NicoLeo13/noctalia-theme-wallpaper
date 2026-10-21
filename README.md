@@ -268,6 +268,11 @@ using, not a fresh one it drew. It checks every three seconds, so a wallpaper
 change made anywhere shows up on its own. **Draw a new one** makes another
 palette and shows it, and **Use this palette** makes it the live one.
 
+The Desktop wallpaper tab also says whether the theme mode is pinned. Noctalia
+lets you set the mode to `dark` or `light` instead of `auto`, and when it is
+pinned the day and night schedule never runs, so the wallpaper quietly stops
+following the sun. The window notices that and offers a way back.
+
 The other two tabs keep up as well. Each has a **Right now** group that shows
 the picture the desktop is really using, and the wallpaper on screen is marked in
 the picker with a border of its own, so it cannot be mistaken for the image that
