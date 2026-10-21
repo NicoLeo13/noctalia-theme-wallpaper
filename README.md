@@ -252,7 +252,10 @@ holds every one, including the ones Noctalia or you made. Each row has a **Use**
 button that applies it and a **Delete** button that removes it.
 
 Every palette says how it was made, in the row and under the swatches. The
-values come from the file itself, so they are never a guess.
+values come from the file itself, so they are never a guess. Each row also
+carries four small colour dots, the primary, the secondary, the tertiary and the
+error colour, so a list can be told apart at a glance. This is the same preview
+Noctalia shows for a custom palette.
 
 ```text
   ours-random                       random, duotone, seed 3, beach.jpg
@@ -264,6 +267,10 @@ The window shows the palette that is **live**, read from the file Noctalia is
 using, not a fresh one it drew. It checks every three seconds, so a wallpaper
 change made anywhere shows up on its own. **Draw a new one** makes another
 palette and shows it, and **Use this palette** makes it the live one.
+
+The other two tabs keep up as well. Each has a **Right now** group that says
+what the desktop is really showing, and the wallpaper on screen is marked in the
+picker.
 
 The name of a saved palette is up to you. A name that starts with the wallpaper
 name groups it under that wallpaper.

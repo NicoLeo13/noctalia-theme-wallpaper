@@ -46,6 +46,9 @@ DESKTOP_PAGE = "Desktop wallpaper"
 LOCKSCREEN_PAGE = "KDE lock screen"
 PALETTE_PAGE = "Palette"
 
+# The four colours Noctalia shows beside a palette name.
+PREVIEW_FIELDS = ("mPrimary", "mSecondary", "mTertiary", "mError")
+
 # The colour roles shown in the preview, in the order they are drawn. The first
 # part is the key as Noctalia names it, so the lookup cannot get it wrong.
 SWATCH_ROLES = (
@@ -334,6 +337,8 @@ class PickerGroup(Adw.PreferencesGroup):
         self.mirror = mirror
         self.images: list[str] = []
         self.selected = ""
+        self.current = ""
+        self.buttons: dict[str, Gtk.Button] = {}
         self.folder_row = None
 
         if mirror is None:
@@ -431,6 +436,7 @@ class PickerGroup(Adw.PreferencesGroup):
             button.connect("clicked", self._on_thumb, path)
             self.grid.attach(button, self._next_cell, 0, 1, 1)
             self._next_cell += 1
+            self.buttons[path] = button
             rendered += 1
 
         self.grid.attach(self.empty, 0, 0, GRID_COLUMNS, 1)
@@ -450,6 +456,15 @@ class PickerGroup(Adw.PreferencesGroup):
         else:
             self.status.set_title(f"{name} (not in this folder)")
             self.status.set_subtitle(self.selected)
+
+    def set_current(self, path: str) -> None:
+        """Mark the wallpaper that is on screen, without rebuilding the strip."""
+        self.current = path or ""
+        for candidate, button in self.buttons.items():
+            if candidate == self.current:
+                button.add_css_class("suggested-action")
+            else:
+                button.remove_css_class("suggested-action")
 
     def _on_thumb(self, _button, path: str) -> None:
         self.selected = path
@@ -477,12 +492,51 @@ class PickerGroup(Adw.PreferencesGroup):
             self.on_change(self)
 
 
+class PaletteDots(Gtk.Box):
+    """Four small colour dots, like Noctalia shows beside a palette name.
+
+    Noctalia shows the primary, the secondary, the tertiary and the error
+    colour of a palette, so a list of palettes can be told apart at a glance.
+    """
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=2,
+                         valign=Gtk.Align.CENTER)
+        self.dots: list[Gtk.Label] = []
+        self.providers: list[Gtk.CssProvider] = []
+        for _ in range(len(PREVIEW_FIELDS)):
+            dot = Gtk.Label(label="")
+            dot.set_size_request(13, 13)
+            dot.add_css_class("palette-dot")
+            provider = Gtk.CssProvider()
+            dot.get_style_context().add_provider(
+                provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+            self.append(dot)
+            self.dots.append(dot)
+            self.providers.append(provider)
+
+    def set_palette(self, data: dict, mode: str) -> None:
+        roles = data.get(mode) if isinstance(data, dict) else None
+        if not isinstance(roles, dict):
+            roles = {}
+        for dot, provider, key in zip(self.dots, self.providers, PREVIEW_FIELDS):
+            value = roles.get(key, "")
+            if value:
+                provider.load_from_data(f"label {{ background-color: {value}; }}")
+                dot.set_text(" ")
+            else:
+                provider.load_from_data("label { background-color: transparent; }")
+                dot.set_text("")
+
+
 class PaletteStrip(Gtk.Box):
     """A row of colour swatches, one per role."""
 
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, halign=Gtk.Align.START)
         self.labels: dict[str, Gtk.Label] = {}
+        self.providers: dict[str, Gtk.CssProvider] = {}
         # A surface swatch is the same colour as the panel it sits on, so every
         # swatch needs a border to be seen at all.
         border = Gtk.CssProvider()
@@ -518,9 +572,16 @@ class PaletteStrip(Gtk.Box):
             label.set_text("")
             if not value:
                 continue
-            provider = Gtk.CssProvider()
+            # One provider per swatch, reloaded each time. Adding a new
+            # provider on every change would pile them up on the context.
+            provider = self.providers.get(key)
+            if provider is None:
+                provider = Gtk.CssProvider()
+                self.providers[key] = provider
+                label.get_style_context().add_provider(
+                    provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+                )
             provider.load_from_data(f"label {{ background-color: {value}; }}")
-            label.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
             label.set_text(" ")
 
 
@@ -547,6 +608,7 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         self._generated_for = ""
         self._mine_rows: list = []
         self._all_rows: list = []
+        self._dots: list = []
 
         # A TabView with its own bar, because a bare ViewStack shows no way to
         # reach the second page. append() wraps each child in an AdwTabPage,
@@ -598,6 +660,11 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
     # ------------------------------------------------------------- desktop
     def _build_desktop_page(self) -> None:
         page = self.desktop_content
+
+        now = Adw.PreferencesGroup(title="Right now")
+        page.add(now)
+        self.now_row = Adw.ActionRow(title="The wallpaper on screen")
+        now.add(self.now_row)
 
         # A PreferencesPage only accepts groups, so the loose rows go in one.
         top = Adw.PreferencesGroup()
@@ -700,6 +767,11 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
     # ---------------------------------------------------------- lockscreen
     def _build_lockscreen_page(self) -> None:
         page = self.lock_content
+
+        now = Adw.PreferencesGroup(title="Right now")
+        page.add(now)
+        self.lock_now_row = Adw.ActionRow(title="The lock screen image")
+        now.add(self.lock_now_row)
 
         top = Adw.PreferencesGroup()
         page.add(top)
@@ -805,9 +877,43 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         """Look at the world now and then, and follow it."""
         try:
             self._refresh_palette()
+            self._refresh_now()
         except Exception:
             pass
         return True
+
+    def _refresh_now(self) -> None:
+        """Show what the desktop is showing, on both tabs."""
+        wallpaper = self._current_wallpaper()
+        self.now_row.set_title("The wallpaper on screen")
+        self.now_row.set_subtitle(os.path.basename(wallpaper) if wallpaper else "Nothing yet")
+
+        lock = self._current_lock_screen()
+        self.lock_now_row.set_title("The lock screen image")
+        self.lock_now_row.set_subtitle(os.path.basename(lock) if lock else "Nothing yet")
+
+        # The lock screen follows the desktop, so the desktop path is the one
+        # worth marking in the pickers.
+        for picker in self.pickers:
+            picker.set_current(wallpaper)
+
+    def _current_lock_screen(self) -> str:
+        """The image the KDE lock screen shows right now.
+
+        The file lives in the config folder next to the Noctalia one, which is
+        where KDE keeps it and where the hook writes it.
+        """
+        path = os.environ.get(
+            "THEME_WALLPAPER_LOCKSCREEN_RC", os.path.expanduser("~/.config/kscreenlockerrc")
+        )
+        try:
+            with open(path, encoding="utf-8") as handle:
+                for line in handle:
+                    if line.startswith("Image="):
+                        return line.split("=", 1)[1].strip()
+        except OSError:
+            pass
+        return ""
 
     def _current_wallpaper(self) -> str:
         try:
@@ -1140,6 +1246,7 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             for row in rows:
                 group.remove(row)
             rows.clear()
+        self._dots.clear()
 
         stem = os.path.splitext(os.path.basename(wallpaper))[0] if wallpaper else ""
         saved = self._saved_palettes()
@@ -1157,6 +1264,10 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         ):
             for name, wp, data in items:
                 row = Adw.ActionRow(title=name)
+                dots = PaletteDots()
+                dots.set_palette(data, self._preview_mode())
+                row.add_prefix(dots)
+                self._dots.append(dots)
                 details = []
                 made = self._composition_of(data)
                 if made:
