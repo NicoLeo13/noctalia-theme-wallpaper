@@ -232,6 +232,24 @@ The GUI needs only `python3-gobject`, GTK 4 and libadwaita, all of which are
 already on Fedora by default. `install.sh` checks for them and skips the GUI if
 they are missing. The hook never depends on the GUI.
 
+### The palette window
+
+The **Palette** tab shows the palette the current wallpaper produces, with a
+swatch for every colour role. **Draw a new one** makes another palette from the
+same wallpaper, and **Save this palette** keeps it.
+
+A saved palette is written into `~/.config/noctalia/palettes/`, which is the
+folder Noctalia reads. It therefore appears in Noctalia's own custom palette
+list straight away, with a preview, and needs nothing else to work.
+
+The window lists the saved palettes twice. **Saved for this wallpaper** holds
+the ones that belong to the wallpaper on screen, and **All custom palettes**
+holds every one, including the ones Noctalia or you made. Each row has a **Use**
+button that applies it and a **Delete** button that removes it.
+
+The name of a saved palette is up to you. A name that starts with the wallpaper
+name groups it under that wallpaper.
+
 ### Config file handling
 
 The GUI edits `KEY=VALUE` lines in place. It keeps your comments, blank lines and

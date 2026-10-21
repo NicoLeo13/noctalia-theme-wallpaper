@@ -10,6 +10,8 @@ Uses the standard library and the GTK 4 / libadwaita introspection bindings only
 
 from __future__ import annotations
 
+import importlib.util
+import json
 import os
 import stat
 import subprocess
@@ -42,6 +44,65 @@ STRATEGY_LABELS = [l for _v, l, _d in STRATEGIES]
 
 DESKTOP_PAGE = "Desktop wallpaper"
 LOCKSCREEN_PAGE = "KDE lock screen"
+PALETTE_PAGE = "Palette"
+
+# The colour roles shown in the preview, in the order they are drawn. The first
+# part is the key as Noctalia names it, so the lookup cannot get it wrong.
+SWATCH_ROLES = (
+    ("mPrimary", "Primary"),
+    ("mSecondary", "Secondary"),
+    ("mTertiary", "Tertiary"),
+    ("mError", "Error"),
+    ("mSurface", "Surface"),
+    ("mSurfaceVariant", "Surface variant"),
+    ("mOnSurface", "Text"),
+    ("mOutline", "Outline"),
+)
+
+# The three generators, and the explanation shown under the selector.
+GENERATORS = (
+    ("noctalia", "Noctalia draws it", "Noctalia makes the palette from the wallpaper, with the scheme you pick in Noctalia."),
+    ("ours", "This tool draws it", "A palette is made from the wallpaper and applied as a Noctalia custom palette."),
+    ("random", "This tool draws it at random", "The accents move around the hue of the wallpaper, so each wallpaper still feels like itself."),
+)
+
+VARIANTS = (
+    ("duotone", "Keep the picture's hues", "Light is washed out and high key, dark is deep and saturated."),
+    ("tonal", "One seed hue, like Noctalia", "All three accents come from one colour of the picture."),
+)
+
+
+def load_generator():
+    """Load the palette generator.
+
+    It lives next to the hook script when the program is installed, and in
+    the files folder when it is run straight from a checkout. Both are tried.
+    """
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    explicit = os.environ.get("THEME_WALLPAPER_PALETTE_GENERATOR")
+    if explicit:
+        candidates.append(explicit)
+    candidates.append(os.path.join(here, "hooks", "palette-generator.py"))
+    candidates.append(os.path.join(here, "..", "files", "palette-generator.py"))
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("palette_generator", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+        except Exception:
+            continue
+        return module
+    return None
+
+
+def palette_dir() -> str:
+    explicit = os.environ.get("THEME_WALLPAPER_PALETTE_DIR")
+    if explicit:
+        return explicit
+    return os.path.join(config_home(), "palettes")
 
 
 def config_home() -> str:
@@ -89,6 +150,7 @@ class Config:
         self.path = path
         self.lines: list[str] = []
         self.values: dict[str, str] = {}
+        self._disk_text = ""
         self.load()
 
     def load(self) -> None:
@@ -103,6 +165,7 @@ class Config:
             self.lines = []
         if self.lines and self.lines[-1] == "":
             self.lines.pop()
+        self._disk_text = "\n".join(self.lines) + ("\n" if self.lines else "")
         self.values = {}
         for line in self.lines:
             key, value = parse_line(line)
@@ -152,9 +215,13 @@ class Config:
         The window has no unsaved-state model, because the hook reads the
         file on every switch. Without this check, a save would overwrite a
         hand edit made in another editor after the window opened.
+
+        The test is against the text as it was last read, not against the
+        current in-memory text. Comparing with the in-memory text would
+        mistake the window's own pending change for an outside edit and throw
+        that change away.
         """
-        current = self.on_disk()
-        if current == self.rendered_text():
+        if self.on_disk() == self._disk_text:
             return False
         self.load()
         return True
@@ -188,6 +255,7 @@ class Config:
                 pass
             raise
         os.replace(tmp, self.path)
+        self._disk_text = self.rendered_text()
 
 
 def scan_images(directory: str) -> list[str]:
@@ -403,6 +471,53 @@ class PickerGroup(Adw.PreferencesGroup):
             self.on_change(self)
 
 
+class PaletteStrip(Gtk.Box):
+    """A row of colour swatches, one per role."""
+
+    def __init__(self):
+        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=6, halign=Gtk.Align.START)
+        self.labels: dict[str, Gtk.Label] = {}
+        # A surface swatch is the same colour as the panel it sits on, so every
+        # swatch needs a border to be seen at all.
+        border = Gtk.CssProvider()
+        border.load_from_data(
+            ".palette-swatch { border: 1px solid alpha(128,128,128,0.75); border-radius: 3px; }"
+        )
+        for key, title in SWATCH_ROLES:
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            swatch = Gtk.Label(label="")
+            swatch.add_css_class("palette-swatch")
+            swatch.get_style_context().add_provider(
+                border, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+            swatch.set_size_request(46, 30)
+            caption = Gtk.Label(label=title)
+            caption.add_css_class("caption")
+            caption.add_css_class("dim-label")
+            box.append(swatch)
+            box.append(caption)
+            self.append(box)
+            self.labels[key] = swatch
+
+    def set_palette(self, palette: dict, mode: str) -> None:
+        """Show one mode of a palette, or blank the strip when there is none."""
+        roles = palette.get(mode) if isinstance(palette, dict) else None
+        if not isinstance(roles, dict):
+            for label in self.labels.values():
+                label.set_text("")
+            return
+        for key, _title in SWATCH_ROLES:
+            value = roles.get(key, "")
+            label = self.labels[key]
+            label.set_text("")
+            if not value:
+                continue
+            provider = Gtk.CssProvider()
+            provider.load_from_data(f"label {{ background-color: {value}; }}")
+            label.get_style_context().add_provider(provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            label.set_text(" ")
+
+
 class ThemeWallpaperWindow(Adw.ApplicationWindow):
     def __init__(self, application, conf_path: str, hook_path: str):
         super().__init__(application=application, title="Noctalia Theme Wallpaper")
@@ -420,6 +535,10 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
 
         self.desktop_content = Adw.PreferencesPage()
         self.lock_content = Adw.PreferencesPage()
+        self.palette_content = Adw.PreferencesPage()
+        self._preview: dict = {}
+        self._mine_rows: list = []
+        self._all_rows: list = []
 
         # A TabView with its own bar, because a bare ViewStack shows no way to
         # reach the second page. append() wraps each child in an AdwTabPage,
@@ -428,9 +547,11 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         self.tabs = Adw.TabView()
         self.tabs.append(self.desktop_content)
         self.tabs.append(self.lock_content)
+        self.tabs.append(self.palette_content)
         for page, title, icon in (
             (self.tabs.get_nth_page(0), DESKTOP_PAGE, "preferences-desktop-wallpaper-symbolic"),
             (self.tabs.get_nth_page(1), LOCKSCREEN_PAGE, "system-lock-screen-symbolic"),
+            (self.tabs.get_nth_page(2), PALETTE_PAGE, "applications-graphics-symbolic"),
         ):
             page.set_title(title)
             page.set_icon(Gio.ThemedIcon.new(icon))
@@ -457,6 +578,7 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
 
         self._build_desktop_page()
         self._build_lockscreen_page()
+        self._build_palette_page()
 
         self._loading = False
 
@@ -490,6 +612,61 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         page.add(bottom)
         self.mode_row = Adw.ActionRow(title="Checking the current theme mode")
         bottom.add(self.mode_row)
+        page.set_vexpand(True)
+
+    # ------------------------------------------------------------- palette
+    def _build_palette_page(self) -> None:
+        page = self.palette_content
+
+        top = Adw.PreferencesGroup()
+        page.add(top)
+
+        self.generator_row = Adw.ComboRow(
+            title="Who draws the palette",
+            model=Gtk.StringList.new([label for _v, label, _d in GENERATORS]),
+        )
+        self.generator_row.connect("notify::selected", self._on_generator_changed)
+        top.add(self.generator_row)
+
+        self.generator_desc = Adw.ActionRow()
+        top.add(self.generator_desc)
+
+        self.variant_row = Adw.ComboRow(
+            title="How the two modes differ",
+            model=Gtk.StringList.new([label for _v, label, _d in VARIANTS]),
+        )
+        self.variant_row.connect("notify::selected", self._on_variant_changed)
+        top.add(self.variant_row)
+
+        self.variant_desc = Adw.ActionRow()
+        top.add(self.variant_desc)
+
+        self.palette_group = Adw.PreferencesGroup(title="The palette right now")
+        page.add(self.palette_group)
+
+        self.palette_strip = PaletteStrip()
+        self.palette_group.add(self.palette_strip)
+
+        self.palette_info = Adw.ActionRow()
+        self.palette_group.add(self.palette_info)
+
+        buttons = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self.generate_button = Gtk.Button(label="Draw a new one")
+        self.generate_button.set_tooltip_text("Make another palette from the current wallpaper")
+        self.generate_button.connect("clicked", lambda _b: self._on_generate())
+        self.save_button = Gtk.Button(label="Save this palette")
+        self.save_button.add_css_class("suggested-action")
+        self.save_button.set_tooltip_text("Keep this palette in the list and in Noctalia")
+        self.save_button.connect("clicked", lambda _b: self._on_save_palette())
+        buttons.append(self.generate_button)
+        buttons.append(self.save_button)
+        self.palette_group.add(buttons)
+
+        self.mine_group = Adw.PreferencesGroup(title="Saved for this wallpaper")
+        page.add(self.mine_group)
+
+        self.all_group = Adw.PreferencesGroup(title="All custom palettes")
+        page.add(self.all_group)
         page.set_vexpand(True)
 
     # ---------------------------------------------------------- lockscreen
@@ -543,9 +720,18 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             0 if self.cfg.get("LOCKSCREEN_SOURCE", "desktop").strip().lower() == "desktop" else 1
         )
 
+        generator = self.cfg.get("PALETTE_GENERATOR", "noctalia").strip().lower()
+        values = [v for v, _l, _d in GENERATORS]
+        self.generator_row.set_selected(values.index(generator) if generator in values else 0)
+        variant = self.cfg.get("PALETTE_VARIANT", "duotone").strip().lower()
+        vvalues = [v for v, _l, _d in VARIANTS]
+        self.variant_row.set_selected(vvalues.index(variant) if variant in vvalues else 0)
+
         self._loading = False
         self._update_visibility()
+        self._update_palette_visibility()
         self._update_mode_label()
+        self._refresh_palette()
 
     def _strategy(self) -> str:
         index = self.strategy_row.get_selected()
@@ -582,6 +768,276 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             self.lock_desc.set_title("The lock screen mirrors the desktop wallpaper")
         for picker in self.lock_pickers:
             picker.set_visible(lock_on and custom)
+
+    # ------------------------------------------------------- palette actions
+    def _current_wallpaper(self) -> str:
+        try:
+            done = subprocess.run(
+                ["noctalia", "msg", "wallpaper-get"], capture_output=True, text=True, timeout=10
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        return done.stdout.strip().split("\n")[0].strip()
+
+    def _generator(self) -> str:
+        index = self.generator_row.get_selected()
+        values = [v for v, _l, _d in GENERATORS]
+        return values[index] if 0 <= index < len(values) else "noctalia"
+
+    def _variant(self) -> str:
+        index = self.variant_row.get_selected()
+        values = [v for v, _l, _d in VARIANTS]
+        return values[index] if 0 <= index < len(values) else "duotone"
+
+    def _seed(self) -> int:
+        raw = self.cfg.get("PALETTE_SEED", "0").strip()
+        try:
+            return int(raw)
+        except ValueError:
+            return 0
+
+    def _on_generator_changed(self, *_args) -> None:
+        self._update_palette_visibility()
+        if not self._loading:
+            self.save_config(silent=True)
+        self._refresh_palette()
+
+    def _on_variant_changed(self, *_args) -> None:
+        if not self._loading:
+            self.save_config(silent=True)
+        self._refresh_palette()
+
+    def _update_palette_visibility(self) -> None:
+        generator = self._generator()
+        ours = generator in ("ours", "random")
+        self.variant_row.set_sensitive(ours)
+        self.variant_desc.set_sensitive(ours)
+        self.generate_button.set_sensitive(ours)
+        self.save_button.set_sensitive(ours)
+        for value, label, description in GENERATORS:
+            if value == generator:
+                self.generator_desc.set_title(description)
+                break
+        for value, label, description in VARIANTS:
+            if value == self._variant():
+                self.variant_desc.set_title(description)
+                break
+
+    def _refresh_palette(self) -> None:
+        """Draw the palette for the current wallpaper, and list the saved ones."""
+        generator = self._generator()
+        wallpaper = self._current_wallpaper()
+
+        if generator == "noctalia":
+            self.palette_strip.set_palette({}, "dark")
+            self.palette_info.set_title("Noctalia draws the palette")
+            self.palette_info.set_subtitle(
+                "Change the scheme in Noctalia's own settings, or set PALETTE_SCHEME."
+            )
+            self._refresh_saved_palettes(wallpaper)
+            return
+
+        module = load_generator()
+        if module is None:
+            self.palette_strip.set_palette({}, "dark")
+            self.palette_info.set_title("The palette generator is not installed")
+            self.palette_info.set_subtitle("Run install.sh to put it next to the hook script.")
+            self._refresh_saved_palettes(wallpaper)
+            return
+
+        try:
+            palette = module.build_palette(
+                wallpaper,
+                variant=self._variant(),
+                seed=self._seed(),
+                random_mode=(generator == "random"),
+            )
+        except Exception as exc:
+            self.palette_strip.set_palette({}, "dark")
+            self.palette_info.set_title("The palette could not be drawn")
+            self.palette_info.set_subtitle(str(exc))
+            self._refresh_saved_palettes(wallpaper)
+            return
+
+        self._preview = palette
+        mode = self._preview_mode()
+        self.palette_strip.set_palette(palette, mode)
+        self.palette_info.set_title(os.path.basename(wallpaper) if wallpaper else "No wallpaper")
+        self.palette_info.set_subtitle(
+            f"{self._variant()} palette, seed {self._seed()}, showing the {mode} side"
+        )
+        self._refresh_saved_palettes(wallpaper)
+
+    def _preview_mode(self) -> str:
+        mode = ""
+        try:
+            done = subprocess.run(
+                ["noctalia", "msg", "theme-mode-get"], capture_output=True, text=True, timeout=10
+            )
+            mode = done.stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return mode if mode in ("light", "dark") else "dark"
+
+    def _on_generate(self) -> None:
+        """Draw another palette from the same wallpaper."""
+        self.cfg.set("PALETTE_SEED", str(self._seed() + 1))
+        self.save_config(silent=True)
+        self._refresh_palette()
+        self.toasts.add_toast(Adw.Toast.new("Drew a new palette"))
+
+    def _on_save_palette(self) -> None:
+        """Write the palette that is on screen into the palettes folder."""
+        palette = getattr(self, "_preview", None)
+        if not palette:
+            self.toasts.add_toast(Adw.Toast.new("There is no palette to save yet"))
+            return
+        wallpaper = self._current_wallpaper()
+        stem = os.path.splitext(os.path.basename(wallpaper))[0] if wallpaper else "wallpaper"
+        suggested = f"{stem}-r{self._seed()}"
+
+        dialog = Adw.AlertDialog(
+            heading="Save this palette",
+            body="The name shows up in Noctalia and in this window. A name that starts with the wallpaper name groups it under that wallpaper.",
+        )
+        entry = Adw.EntryRow(title="Name")
+        entry.set_text(suggested)
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("save", "Save")
+        dialog.set_response_appearance("save", Adw.ResponseAppearance.SUGGESTED)
+        dialog.set_extra_child(entry)
+        dialog.set_default_response("save")
+        dialog.set_close_response("cancel")
+
+        def on_response(dlg, response):
+            if response != "save":
+                return
+            name = entry.get_text().strip()
+            if not name:
+                self.toasts.add_toast(Adw.Toast.new("The name cannot be empty"))
+                return
+            self._write_palette(name, palette, wallpaper)
+            dlg.close()
+
+        dialog.connect("response", on_response)
+        dialog.present(self)
+
+    def _write_palette(self, name: str, palette: dict, wallpaper: str) -> None:
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in name).strip("-")
+        if not safe:
+            self.toasts.add_toast(Adw.Toast.new("That name cannot be used"))
+            return
+        folder = palette_dir()
+        try:
+            os.makedirs(folder, exist_ok=True)
+            path = os.path.join(folder, f"{safe}.json")
+            payload = dict(palette)
+            # Noctalia ignores keys it does not know, and this one records which
+            # wallpaper the palette came from.
+            payload["wallpaper"] = wallpaper
+            temporary = f"{path}.tmp"
+            with open(temporary, "w", encoding="utf-8") as handle:
+                json.dump(payload, handle, indent=2)
+                handle.write("\n")
+            os.replace(temporary, path)
+        except OSError as exc:
+            self.toasts.add_toast(Adw.Toast.new(f"Could not save: {exc}"))
+            return
+        self.toasts.add_toast(Adw.Toast.new(f"Saved {safe}"))
+        self._refresh_saved_palettes(wallpaper)
+        self._apply_palette(safe)
+
+    def _saved_palettes(self) -> list[tuple[str, str]]:
+        """Every palette file, with the wallpaper each one came from."""
+        folder = palette_dir()
+        found: list[tuple[str, str]] = []
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            return found
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            path = os.path.join(folder, name)
+            stem = name[:-5]
+            wallpaper = ""
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    data = json.load(handle)
+                wallpaper = data.get("wallpaper", "")
+            except (OSError, ValueError):
+                pass
+            found.append((stem, wallpaper))
+        return found
+
+    def _refresh_saved_palettes(self, wallpaper: str) -> None:
+        # An AdwPreferencesGroup keeps its rows inside a box of its own, so
+        # get_first_child() gives that box and not a row. Removing it would
+        # break the group, so the rows that were added are remembered and
+        # removed by name.
+        for group, rows in ((self.mine_group, self._mine_rows), (self.all_group, self._all_rows)):
+            for row in rows:
+                group.remove(row)
+            rows.clear()
+
+        stem = os.path.splitext(os.path.basename(wallpaper))[0] if wallpaper else ""
+        saved = self._saved_palettes()
+        mine = [(name, wp) for name, wp in saved if stem and name.startswith(stem)]
+        theirs = [(name, wp) for name, wp in saved if (name, wp) not in mine]
+
+        for items, group, rows in (
+            (mine, self.mine_group, self._mine_rows),
+            (theirs, self.all_group, self._all_rows),
+        ):
+            for name, wp in items:
+                row = Adw.ActionRow(title=name)
+                row.set_subtitle(os.path.basename(wp) if wp else "No wallpaper recorded")
+                apply_button = Gtk.Button(label="Use")
+                apply_button.set_valign(Gtk.Align.CENTER)
+                apply_button.add_css_class("suggested-action")
+                apply_button.connect("clicked", lambda _b, n=name: self._apply_palette(n))
+                row.add_suffix(apply_button)
+                delete_button = Gtk.Button(label="Delete")
+                delete_button.set_valign(Gtk.Align.CENTER)
+                delete_button.add_css_class("destructive-action")
+                delete_button.connect("clicked", lambda _b, n=name: self._delete_palette(n))
+                row.add_suffix(delete_button)
+                group.add(row)
+                rows.append(row)
+
+        if not mine:
+            row = Adw.ActionRow(title="Nothing saved for this wallpaper yet")
+            row.set_subtitle("Draw one and save it to keep it here")
+            self.mine_group.add(row)
+            self._mine_rows.append(row)
+        if not theirs:
+            row = Adw.ActionRow(title="No other custom palettes")
+            self.all_group.add(row)
+            self._all_rows.append(row)
+
+    def _apply_palette(self, name: str) -> None:
+        try:
+            done = subprocess.run(
+                ["noctalia", "msg", "color-scheme-set", "custom", name],
+                capture_output=True, text=True, timeout=15,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.toasts.add_toast(Adw.Toast.new(f"Could not apply: {exc}"))
+            return
+        if done.returncode == 0:
+            self.toasts.add_toast(Adw.Toast.new(f"Using {name}"))
+        else:
+            self.toasts.add_toast(Adw.Toast.new("Noctalia would not take that palette"))
+
+    def _delete_palette(self, name: str) -> None:
+        path = os.path.join(palette_dir(), f"{name}.json")
+        try:
+            os.remove(path)
+        except OSError as exc:
+            self.toasts.add_toast(Adw.Toast.new(f"Could not delete: {exc}"))
+            return
+        self.toasts.add_toast(Adw.Toast.new(f"Deleted {name}"))
+        self._refresh_saved_palettes(self._current_wallpaper())
 
     # --------------------------------------------------------------- events
     def _on_strategy_changed(self, *_args) -> None:
@@ -661,6 +1117,10 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         for picker in self.lock_pickers:
             if lock_on and custom:
                 self.cfg.set(picker.file_key, picker.current_file())
+
+        self.cfg.set("PALETTE_GENERATOR", self._generator())
+        self.cfg.set("PALETTE_VARIANT", self._variant())
+        self.cfg.set("PALETTE_SEED", str(self._seed()))
 
         try:
             self.cfg.save()

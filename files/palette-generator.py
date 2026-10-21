@@ -410,6 +410,9 @@ def build_palette(
         terminal = build_terminal(roles, hues, dark, target)
         roles["terminal"] = terminal
         result[name] = roles
+    # Noctalia ignores keys it does not know. This one records which wallpaper
+    # the palette came from, so the settings window can group palettes by it.
+    result["wallpaper"] = wallpaper
     return result
 
 
@@ -478,6 +481,10 @@ def check_palette(palette: dict) -> list[str]:
         ("mTertiary", "mSurface", UI_CONTRAST),
     ]
     for mode, roles in palette.items():
+        # The file also holds a "wallpaper" key, which is a path and not a set
+        # of colours.
+        if not isinstance(roles, dict):
+            continue
         for foreground, background, target in pairs:
             ratio = contrast_of(roles[foreground], roles[background])
             if ratio < target:
