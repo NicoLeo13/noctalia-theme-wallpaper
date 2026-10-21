@@ -1029,13 +1029,32 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         else:
             self.toasts.add_toast(Adw.Toast.new("Noctalia would not take that palette"))
 
+    def _active_palette(self) -> str:
+        """The name of the palette Noctalia is using, or an empty string."""
+        try:
+            done = subprocess.run(
+                ["noctalia", "msg", "color-scheme-get"], capture_output=True, text=True, timeout=10
+            )
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        parts = done.stdout.strip().split()
+        if len(parts) == 2 and parts[0] == "custom":
+            return parts[1]
+        return ""
+
     def _delete_palette(self, name: str) -> None:
         path = os.path.join(palette_dir(), f"{name}.json")
+        was_active = self._active_palette() == name
         try:
             os.remove(path)
         except OSError as exc:
             self.toasts.add_toast(Adw.Toast.new(f"Could not delete: {exc}"))
             return
+        if was_active:
+            # Noctalia would keep pointing at a file that is no longer there,
+            # and it would quietly fall back to a built-in. Put it back on the
+            # palette the generator draws.
+            self._apply_palette("ours")
         self.toasts.add_toast(Adw.Toast.new(f"Deleted {name}"))
         self._refresh_saved_palettes(self._current_wallpaper())
 
