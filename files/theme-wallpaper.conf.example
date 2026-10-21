@@ -82,3 +82,9 @@ PALETTE_VARIANT = duotone
 # The seed for the random generator. The same seed and the same wallpaper always
 # give the same palette. Change it to get a different one.
 PALETTE_SEED = 0
+
+# What to do when the wallpaper has a palette saved for it.
+#
+# always -> draw a new palette every time. This is the default.
+# prefer -> use the saved palette for that wallpaper instead.
+PALETTE_SAVED = always

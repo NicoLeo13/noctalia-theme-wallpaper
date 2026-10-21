@@ -329,6 +329,17 @@ sync_palette() {
 		return 0
 	fi
 
+	# A wallpaper can have palettes saved for it. By default a new one is
+	# drawn every time. The other setting keeps the saved one instead.
+	if [[ "$(cfg PALETTE_SAVED always)" == "prefer" ]]; then
+		saved="$(python3 "$generator_script" --find-saved --wallpaper "$wallpaper" \
+			--palette-dir "$PALETTE_DIR" 2>/dev/null || true)"
+		if [[ -n "$saved" ]] && noctalia msg color-scheme-set custom "$saved" >/dev/null 2>&1; then
+			log "palette: using the saved palette $saved"
+			return 0
+		fi
+	fi
+
 	variant="$(cfg PALETTE_VARIANT duotone)"
 	seed="$(cfg PALETTE_SEED 0)"
 	name="ours"

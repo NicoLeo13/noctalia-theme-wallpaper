@@ -66,6 +66,12 @@ GENERATORS = (
     ("random", "This tool draws it at random", "The accents move around the hue of the wallpaper, so each wallpaper still feels like itself."),
 )
 
+# What to do when the wallpaper already has a palette saved for it.
+SAVED_BEHAVIOUR = (
+    ("always", "Always draw a new one", "A fresh palette is drawn every time the wallpaper changes."),
+    ("prefer", "Use the saved one", "The palette you kept for that wallpaper is used instead."),
+)
+
 VARIANTS = (
     ("duotone", "Keep the picture's hues", "Light is washed out and high key, dark is deep and saturated."),
     ("tonal", "One seed hue, like Noctalia", "All three accents come from one colour of the picture."),
@@ -638,8 +644,19 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         self.variant_row.connect("notify::selected", self._on_variant_changed)
         top.add(self.variant_row)
 
+
         self.variant_desc = Adw.ActionRow()
         top.add(self.variant_desc)
+
+        self.saved_row = Adw.ComboRow(
+            title="When a wallpaper has a saved palette",
+            model=Gtk.StringList.new([label for _v, label, _d in SAVED_BEHAVIOUR]),
+        )
+        self.saved_row.connect("notify::selected", self._on_saved_changed)
+        top.add(self.saved_row)
+
+        self.saved_desc = Adw.ActionRow()
+        top.add(self.saved_desc)
 
         self.palette_group = Adw.PreferencesGroup(title="The palette right now")
         page.add(self.palette_group)
@@ -726,6 +743,9 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         variant = self.cfg.get("PALETTE_VARIANT", "duotone").strip().lower()
         vvalues = [v for v, _l, _d in VARIANTS]
         self.variant_row.set_selected(vvalues.index(variant) if variant in vvalues else 0)
+        behaviour = self.cfg.get("PALETTE_SAVED", "always").strip().lower()
+        svalues = [v for v, _l, _d in SAVED_BEHAVIOUR]
+        self.saved_row.set_selected(svalues.index(behaviour) if behaviour in svalues else 0)
 
         self._loading = False
         self._update_visibility()
@@ -784,6 +804,11 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         values = [v for v, _l, _d in GENERATORS]
         return values[index] if 0 <= index < len(values) else "noctalia"
 
+    def _saved_behaviour(self) -> str:
+        index = self.saved_row.get_selected()
+        values = [v for v, _l, _d in SAVED_BEHAVIOUR]
+        return values[index] if 0 <= index < len(values) else "always"
+
     def _variant(self) -> str:
         index = self.variant_row.get_selected()
         values = [v for v, _l, _d in VARIANTS]
@@ -807,6 +832,11 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             self.save_config(silent=True)
         self._refresh_palette()
 
+    def _on_saved_changed(self, *_args) -> None:
+        if not self._loading:
+            self.save_config(silent=True)
+        self._update_palette_visibility()
+
     def _update_palette_visibility(self) -> None:
         generator = self._generator()
         ours = generator in ("ours", "random")
@@ -821,6 +851,10 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         for value, label, description in VARIANTS:
             if value == self._variant():
                 self.variant_desc.set_title(description)
+                break
+        for value, label, description in SAVED_BEHAVIOUR:
+            if value == self._saved_behaviour():
+                self.saved_desc.set_title(description)
                 break
 
     def _refresh_palette(self) -> None:
@@ -932,9 +966,11 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             os.makedirs(folder, exist_ok=True)
             path = os.path.join(folder, f"{safe}.json")
             payload = dict(palette)
-            # Noctalia ignores keys it does not know, and this one records which
-            # wallpaper the palette came from.
+            # Noctalia ignores keys it does not know. The first records which
+            # wallpaper the palette came from, and the second marks it as one
+            # the person kept rather than the live file the generator writes.
             payload["wallpaper"] = wallpaper
+            payload["saved"] = True
             temporary = f"{path}.tmp"
             with open(temporary, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2)
@@ -947,10 +983,10 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         self._refresh_saved_palettes(wallpaper)
         self._apply_palette(safe)
 
-    def _saved_palettes(self) -> list[tuple[str, str]]:
-        """Every palette file, with the wallpaper each one came from."""
+    def _saved_palettes(self) -> list[tuple[str, str, bool]]:
+        """Every palette file, with the wallpaper it came from and whether it was saved."""
         folder = palette_dir()
-        found: list[tuple[str, str]] = []
+        found: list[tuple[str, str, bool]] = []
         try:
             names = sorted(os.listdir(folder))
         except OSError:
@@ -961,13 +997,15 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             path = os.path.join(folder, name)
             stem = name[:-5]
             wallpaper = ""
+            was_saved = False
             try:
                 with open(path, encoding="utf-8") as handle:
                     data = json.load(handle)
                 wallpaper = data.get("wallpaper", "")
+                was_saved = data.get("saved") is True
             except (OSError, ValueError):
                 pass
-            found.append((stem, wallpaper))
+            found.append((stem, wallpaper, was_saved))
         return found
 
     def _refresh_saved_palettes(self, wallpaper: str) -> None:
@@ -982,8 +1020,12 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
 
         stem = os.path.splitext(os.path.basename(wallpaper))[0] if wallpaper else ""
         saved = self._saved_palettes()
-        mine = [(name, wp) for name, wp in saved if stem and name.startswith(stem)]
-        theirs = [(name, wp) for name, wp in saved if (name, wp) not in mine]
+        # The ones the person kept for this wallpaper go in the first list. The
+        # live file the generator writes is not one of them, because it is
+        # replaced every time the wallpaper changes.
+        mine = [(name, wp) for name, wp, was_saved in saved
+                if was_saved and stem and name.startswith(stem)]
+        theirs = [(name, wp) for name, wp, _s in saved if (name, wp) not in mine]
 
         for items, group, rows in (
             (mine, self.mine_group, self._mine_rows),
@@ -1140,6 +1182,7 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         self.cfg.set("PALETTE_GENERATOR", self._generator())
         self.cfg.set("PALETTE_VARIANT", self._variant())
         self.cfg.set("PALETTE_SEED", str(self._seed()))
+        self.cfg.set("PALETTE_SAVED", self._saved_behaviour())
 
         try:
             self.cfg.save()

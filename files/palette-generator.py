@@ -430,6 +430,44 @@ REQUIRED_TERMINAL = (
 )
 
 
+def find_saved_palette(directory: str, wallpaper: str) -> str:
+    """The name of a saved palette that belongs to this wallpaper.
+
+    A palette file records the wallpaper it came from under a "wallpaper" key.
+    When several were saved for one wallpaper, the one written last wins,
+    because that is the one the person chose most recently.
+    """
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError:
+        return ""
+    best_name = ""
+    best_time = -1.0
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(directory, name)
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if data.get("wallpaper") != wallpaper:
+            continue
+        # Only a palette the person kept counts. The live file the generator
+        # writes records the wallpaper too, but it is replaced every time.
+        if data.get("saved") is not True:
+            continue
+        try:
+            written = os.path.getmtime(path)
+        except OSError:
+            written = 0.0
+        if written >= best_time:
+            best_time = written
+            best_name = name[:-5]
+    return best_name
+
+
 def check_format(palette: dict) -> list[str]:
     """Every role and terminal key Noctalia needs must be present.
 
@@ -524,6 +562,9 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--random", action="store_true", help="randomise the accents")
     parser.add_argument("--contrast", type=float, default=TEXT_CONTRAST)
+    parser.add_argument("--palette-dir", help="where the saved palettes live")
+    parser.add_argument("--find-saved", action="store_true",
+                        help="print the name of the saved palette for this wallpaper")
     parser.add_argument("--print", dest="show", action="store_true")
     parser.add_argument("--check", action="store_true", help="report contrast and exit")
     args = parser.parse_args()
@@ -531,6 +572,15 @@ def main() -> int:
     if not os.path.isfile(args.wallpaper):
         print(f"error: no such wallpaper: {args.wallpaper}", file=sys.stderr)
         return 1
+
+    if args.find_saved:
+        directory = args.palette_dir or os.path.join(
+            os.path.dirname(os.path.abspath(args.wallpaper)), "palettes"
+        )
+        name = find_saved_palette(directory, os.path.abspath(args.wallpaper))
+        if name:
+            print(name)
+        return 0
 
     try:
         palette = build_palette(

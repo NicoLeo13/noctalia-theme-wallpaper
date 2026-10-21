@@ -148,6 +148,10 @@ PALETTE_SEED = 0               # for the random generator
 keeps the picture's real hues, with light washed out and dark deep. `tonal` uses
 one seed hue for all three accents, the way Noctalia's own schemes do.
 
+`PALETTE_SAVED` decides what happens when a wallpaper already has a palette
+saved for it. `always` draws a new one every time, which is the default.
+`prefer` uses the palette you kept for that wallpaper instead.
+
 The palette is a pure function of the wallpaper, so one file is enough. The file
 holds a dark and a light variant, so a theme mode change needs no regeneration
 at all. The generator guarantees the contrast of every colour pair it supplies
@@ -249,6 +253,10 @@ button that applies it and a **Delete** button that removes it.
 
 The name of a saved palette is up to you. A name that starts with the wallpaper
 name groups it under that wallpaper.
+
+The **When a wallpaper has a saved palette** setting sits at the top of the
+Palette tab. It decides whether a new palette is drawn every time the wallpaper
+changes, or whether the one you saved is used.
 
 ### Config file handling
 
