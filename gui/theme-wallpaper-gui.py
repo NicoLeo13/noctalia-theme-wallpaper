@@ -543,6 +543,8 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         self.lock_content = Adw.PreferencesPage()
         self.palette_content = Adw.PreferencesPage()
         self._preview: dict = {}
+        self._candidate: dict = {}
+        self._generated_for = ""
         self._mine_rows: list = []
         self._all_rows: list = []
 
@@ -585,6 +587,11 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         self._build_desktop_page()
         self._build_lockscreen_page()
         self._build_palette_page()
+
+        # The desktop changes without the window being told, so the window
+        # looks at the world now and then. Without this the swatches show a
+        # palette that is no longer the one on screen.
+        self._watch = GLib.timeout_add_seconds(3, self._tick)
 
         self._loading = False
 
@@ -671,11 +678,15 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         self.generate_button = Gtk.Button(label="Draw a new one")
         self.generate_button.set_tooltip_text("Make another palette from the current wallpaper")
         self.generate_button.connect("clicked", lambda _b: self._on_generate())
+        self.apply_button = Gtk.Button(label="Use this palette")
+        self.apply_button.set_tooltip_text("Make this the palette the desktop uses now")
+        self.apply_button.connect("clicked", lambda _b: self._on_apply_candidate())
         self.save_button = Gtk.Button(label="Save this palette")
         self.save_button.add_css_class("suggested-action")
         self.save_button.set_tooltip_text("Keep this palette in the list and in Noctalia")
         self.save_button.connect("clicked", lambda _b: self._on_save_palette())
         buttons.append(self.generate_button)
+        buttons.append(self.apply_button)
         buttons.append(self.save_button)
         self.palette_group.add(buttons)
 
@@ -790,6 +801,14 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             picker.set_visible(lock_on and custom)
 
     # ------------------------------------------------------- palette actions
+    def _tick(self) -> bool:
+        """Look at the world now and then, and follow it."""
+        try:
+            self._refresh_palette()
+        except Exception:
+            pass
+        return True
+
     def _current_wallpaper(self) -> str:
         try:
             done = subprocess.run(
@@ -844,6 +863,7 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         self.variant_desc.set_sensitive(ours)
         self.generate_button.set_sensitive(ours)
         self.save_button.set_sensitive(ours)
+        self.apply_button.set_sensitive(bool(getattr(self, "_candidate", None)))
         for value, label, description in GENERATORS:
             if value == generator:
                 self.generator_desc.set_title(description)
@@ -858,49 +878,76 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
                 break
 
     def _refresh_palette(self) -> None:
-        """Draw the palette for the current wallpaper, and list the saved ones."""
-        generator = self._generator()
+        """Bring the window in line with what the desktop is showing.
+
+        The live palette is read from its file, so the swatches always tell
+        the truth. A palette is only drawn when the wallpaper changed, or when
+        the person asked for a new one.
+        """
         wallpaper = self._current_wallpaper()
+        generator = self._generator()
 
         if generator == "noctalia":
             self.palette_strip.set_palette({}, "dark")
-            self.palette_info.set_title("Noctalia draws the palette")
+            self.palette_info.set_title(os.path.basename(wallpaper) if wallpaper else "No wallpaper")
             self.palette_info.set_subtitle(
-                "Change the scheme in Noctalia's own settings, or set PALETTE_SCHEME."
+                "Noctalia draws the live palette. Choose another generator to see it here."
             )
             self._refresh_saved_palettes(wallpaper)
             return
 
-        module = load_generator()
-        if module is None:
-            self.palette_strip.set_palette({}, "dark")
-            self.palette_info.set_title("The palette generator is not installed")
-            self.palette_info.set_subtitle("Run install.sh to put it next to the hook script.")
-            self._refresh_saved_palettes(wallpaper)
-            return
+        if wallpaper != self._generated_for:
+            module = load_generator()
+            if module is None:
+                self.palette_strip.set_palette({}, "dark")
+                self.palette_info.set_title("The palette generator is not installed")
+                self.palette_info.set_subtitle("Run install.sh to put it next to the hook script.")
+                self._refresh_saved_palettes(wallpaper)
+                return
+            try:
+                self._preview = module.build_palette(
+                    wallpaper,
+                    variant=self._variant(),
+                    seed=self._seed(),
+                    random_mode=(generator == "random"),
+                )
+            except Exception as exc:
+                self.palette_strip.set_palette({}, "dark")
+                self.palette_info.set_title("The palette could not be drawn")
+                self.palette_info.set_subtitle(str(exc))
+                self._refresh_saved_palettes(wallpaper)
+                return
+            self._generated_for = wallpaper
 
-        try:
-            palette = module.build_palette(
-                wallpaper,
-                variant=self._variant(),
-                seed=self._seed(),
-                random_mode=(generator == "random"),
-            )
-        except Exception as exc:
-            self.palette_strip.set_palette({}, "dark")
-            self.palette_info.set_title("The palette could not be drawn")
-            self.palette_info.set_subtitle(str(exc))
-            self._refresh_saved_palettes(wallpaper)
-            return
-
-        self._preview = palette
-        mode = self._preview_mode()
-        self.palette_strip.set_palette(palette, mode)
-        self.palette_info.set_title(os.path.basename(wallpaper) if wallpaper else "No wallpaper")
-        self.palette_info.set_subtitle(
-            f"{self._variant()} palette, seed {self._seed()}, showing the {mode} side"
-        )
+        self._refresh_palette_strip(self._preview, wallpaper)
         self._refresh_saved_palettes(wallpaper)
+
+    def _refresh_palette_strip(self, generated: dict, wallpaper: str) -> None:
+        """Show the palette on screen.
+
+        A palette that was just drawn wins, because that is the one the person
+        is looking at. Otherwise the live palette is shown, so the window
+        always tells the truth about what is on the desktop.
+        """
+        candidate = getattr(self, "_candidate", None)
+        if candidate:
+            data = candidate
+            source = "A new palette you drew"
+        else:
+            name, data = self._active_palette_data()
+            if data:
+                source = f"The live palette, {name}"
+            elif generated:
+                data = generated
+                source = "A palette drawn from the wallpaper"
+            else:
+                data = {}
+                source = "No palette file to show"
+
+        mode = self._preview_mode()
+        self.palette_strip.set_palette(data, mode)
+        self.palette_info.set_title(os.path.basename(wallpaper) if wallpaper else "No wallpaper")
+        self.palette_info.set_subtitle(f"{source} - {self._composition_of(data)} - the {mode} side")
 
     def _preview_mode(self) -> str:
         mode = ""
@@ -913,10 +960,70 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             pass
         return mode if mode in ("light", "dark") else "dark"
 
+    def _load_palette_file(self, name: str) -> dict:
+        path = os.path.join(palette_dir(), f"{name}.json")
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return json.load(handle)
+        except (OSError, ValueError):
+            return {}
+
+    def _active_palette_data(self) -> tuple[str, dict]:
+        """The palette Noctalia is using, and what is in it."""
+        name = self._active_palette()
+        if not name:
+            return "", {}
+        return name, self._load_palette_file(name)
+
+    def _composition_of(self, data: dict) -> str:
+        """How a palette was made, in words."""
+        if not data:
+            return "Not a file this window knows"
+        parts = []
+        generator = data.get("generator")
+        if generator:
+            parts.append("random" if generator == "random" else "drawn by this tool")
+        variant = data.get("variant")
+        if variant:
+            parts.append(variant)
+        if "seed" in data:
+            parts.append(f"seed {data['seed']}")
+        if not parts:
+            parts.append("made by Noctalia or by hand")
+        return ", ".join(parts)
+
+    def _on_apply_candidate(self) -> None:
+        """Write the palette on screen over the live one and apply it."""
+        candidate = getattr(self, "_candidate", None)
+        if not candidate:
+            self.toasts.add_toast(Adw.Toast.new("There is no new palette to apply"))
+            return
+        name = "ours-random" if self._generator() == "random" else "ours"
+        self._write_palette_to(name, candidate, self._current_wallpaper(), saved=False)
+        self._apply_palette(name)
+        self._candidate = {}
+        self._update_palette_visibility()
+        self._refresh_palette()
+
     def _on_generate(self) -> None:
-        """Draw another palette from the same wallpaper."""
+        """Draw another palette from the same wallpaper and show it."""
         self.cfg.set("PALETTE_SEED", str(self._seed() + 1))
         self.save_config(silent=True)
+        module = load_generator()
+        if module is None:
+            self.toasts.add_toast(Adw.Toast.new("The palette generator is not installed"))
+            return
+        try:
+            self._candidate = module.build_palette(
+                self._current_wallpaper(),
+                variant=self._variant(),
+                seed=self._seed(),
+                random_mode=(self._generator() == "random"),
+            )
+        except Exception as exc:
+            self.toasts.add_toast(Adw.Toast.new(f"Could not draw a palette: {exc}"))
+            return
+        self._update_palette_visibility()
         self._refresh_palette()
         self.toasts.add_toast(Adw.Toast.new("Drew a new palette"))
 
@@ -956,7 +1063,8 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         dialog.connect("response", on_response)
         dialog.present(self)
 
-    def _write_palette(self, name: str, palette: dict, wallpaper: str) -> None:
+    def _write_palette_to(self, name: str, palette: dict, wallpaper: str, saved: bool) -> None:
+        """Write a palette into the folder Noctalia reads."""
         safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in name).strip("-")
         if not safe:
             self.toasts.add_toast(Adw.Toast.new("That name cannot be used"))
@@ -970,7 +1078,15 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             # wallpaper the palette came from, and the second marks it as one
             # the person kept rather than the live file the generator writes.
             payload["wallpaper"] = wallpaper
-            payload["saved"] = True
+            if saved:
+                payload["saved"] = True
+            else:
+                payload.pop("saved", None)
+            # Record how it was made, even for a palette that was made before
+            # this was recorded.
+            payload.setdefault("generator", "random" if self._generator() == "random" else "ours")
+            payload.setdefault("variant", self._variant())
+            payload.setdefault("seed", self._seed())
             temporary = f"{path}.tmp"
             with open(temporary, "w", encoding="utf-8") as handle:
                 json.dump(payload, handle, indent=2)
@@ -979,14 +1095,20 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         except OSError as exc:
             self.toasts.add_toast(Adw.Toast.new(f"Could not save: {exc}"))
             return
-        self.toasts.add_toast(Adw.Toast.new(f"Saved {safe}"))
         self._refresh_saved_palettes(wallpaper)
+        return safe
+
+    def _write_palette(self, name: str, palette: dict, wallpaper: str) -> None:
+        safe = self._write_palette_to(name, palette, wallpaper, saved=True)
+        if not safe:
+            return
+        self.toasts.add_toast(Adw.Toast.new(f"Saved {safe}"))
         self._apply_palette(safe)
 
-    def _saved_palettes(self) -> list[tuple[str, str, bool]]:
+    def _saved_palettes(self) -> list[tuple[str, str, bool, dict]]:
         """Every palette file, with the wallpaper it came from and whether it was saved."""
         folder = palette_dir()
-        found: list[tuple[str, str, bool]] = []
+        found: list[tuple[str, str, bool, dict]] = []
         try:
             names = sorted(os.listdir(folder))
         except OSError:
@@ -998,14 +1120,15 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
             stem = name[:-5]
             wallpaper = ""
             was_saved = False
+            data: dict = {}
             try:
                 with open(path, encoding="utf-8") as handle:
                     data = json.load(handle)
                 wallpaper = data.get("wallpaper", "")
                 was_saved = data.get("saved") is True
             except (OSError, ValueError):
-                pass
-            found.append((stem, wallpaper, was_saved))
+                data = {}
+            found.append((stem, wallpaper, was_saved, data))
         return found
 
     def _refresh_saved_palettes(self, wallpaper: str) -> None:
@@ -1023,17 +1146,24 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         # The ones the person kept for this wallpaper go in the first list. The
         # live file the generator writes is not one of them, because it is
         # replaced every time the wallpaper changes.
-        mine = [(name, wp) for name, wp, was_saved in saved
+        mine = [(name, wp, data) for name, wp, was_saved, data in saved
                 if was_saved and stem and name.startswith(stem)]
-        theirs = [(name, wp) for name, wp, _s in saved if (name, wp) not in mine]
+        theirs = [(name, wp, data) for name, wp, _s, data in saved
+                  if (name, wp) not in [(n, w) for n, w, _d in mine]]
 
         for items, group, rows in (
             (mine, self.mine_group, self._mine_rows),
             (theirs, self.all_group, self._all_rows),
         ):
-            for name, wp in items:
+            for name, wp, data in items:
                 row = Adw.ActionRow(title=name)
-                row.set_subtitle(os.path.basename(wp) if wp else "No wallpaper recorded")
+                details = []
+                made = self._composition_of(data)
+                if made:
+                    details.append(made)
+                if wp:
+                    details.append(os.path.basename(wp))
+                row.set_subtitle(", ".join(details) or "No wallpaper recorded")
                 apply_button = Gtk.Button(label="Use")
                 apply_button.set_valign(Gtk.Align.CENTER)
                 apply_button.add_css_class("suggested-action")

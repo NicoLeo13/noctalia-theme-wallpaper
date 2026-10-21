@@ -251,6 +251,20 @@ the ones that belong to the wallpaper on screen, and **All custom palettes**
 holds every one, including the ones Noctalia or you made. Each row has a **Use**
 button that applies it and a **Delete** button that removes it.
 
+Every palette says how it was made, in the row and under the swatches. The
+values come from the file itself, so they are never a guess.
+
+```text
+  ours-random                       random, duotone, seed 3, beach.jpg
+  ours                              drawn by this tool, duotone, seed 3, dusk.jpg
+  wallhaven-6lyv5x-1920x1080-mc     made by Noctalia or by hand
+```
+
+The window shows the palette that is **live**, read from the file Noctalia is
+using, not a fresh one it drew. It checks every three seconds, so a wallpaper
+change made anywhere shows up on its own. **Draw a new one** makes another
+palette and shows it, and **Use this palette** makes it the live one.
+
 The name of a saved palette is up to you. A name that starts with the wallpaper
 name groups it under that wallpaper.
 

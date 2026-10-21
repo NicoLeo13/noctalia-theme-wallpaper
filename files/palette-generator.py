@@ -410,9 +410,12 @@ def build_palette(
         terminal = build_terminal(roles, hues, dark, target)
         roles["terminal"] = terminal
         result[name] = roles
-    # Noctalia ignores keys it does not know. This one records which wallpaper
-    # the palette came from, so the settings window can group palettes by it.
+    # Noctalia ignores keys it does not know. These record how the palette was
+    # made, so the settings window can show it and group palettes by wallpaper.
     result["wallpaper"] = wallpaper
+    result["generator"] = "random" if random_mode else "ours"
+    result["variant"] = variant
+    result["seed"] = seed
     return result
 
 
