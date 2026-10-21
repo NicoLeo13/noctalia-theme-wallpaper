@@ -49,6 +49,17 @@ PALETTE_PAGE = "Palette"
 # The four colours Noctalia shows beside a palette name.
 PREVIEW_FIELDS = ("mPrimary", "mSecondary", "mTertiary", "mError")
 
+# The wallpaper on screen gets a border of its own. It used to share the
+# "suggested-action" class with the selected image, so the two were
+# impossible to tell apart.
+CURRENT_CSS = """
+button.current-wallpaper {
+  border: 2px solid @accent_color;
+  border-radius: 8px;
+  padding: 1px;
+}
+"""
+
 # The colour roles shown in the preview, in the order they are drawn. The first
 # part is the key as Noctalia names it, so the lookup cannot get it wrong.
 SWATCH_ROLES = (
@@ -444,6 +455,8 @@ class PickerGroup(Adw.PreferencesGroup):
         # fail to decode, which would otherwise leave a blank strip and a
         # misleading "No image selected".
         self.empty.set_visible(rendered == 0)
+        # A rebuilt strip starts without the marker, so put it back.
+        self.set_current(self.current)
 
         if not self.selected:
             self.status.set_title("No image selected")
@@ -462,9 +475,27 @@ class PickerGroup(Adw.PreferencesGroup):
         self.current = path or ""
         for candidate, button in self.buttons.items():
             if candidate == self.current:
-                button.add_css_class("suggested-action")
+                button.add_css_class("current-wallpaper")
             else:
-                button.remove_css_class("suggested-action")
+                button.remove_css_class("current-wallpaper")
+        self._update_status()
+
+    def _update_status(self) -> None:
+        """Say what is on screen, when this folder holds the current wallpaper."""
+        if self.current and self.current in self.images:
+            self.status.set_title("On screen now")
+            self.status.set_subtitle(self.current)
+        elif self.selected:
+            name = os.path.basename(self.selected)
+            if self.selected in self.images:
+                self.status.set_title(name)
+                self.status.set_subtitle(self.selected)
+            else:
+                self.status.set_title(f"{name} (not in this folder)")
+                self.status.set_subtitle(self.selected)
+        else:
+            self.status.set_title("No image selected")
+            self.status.set_subtitle("Type a path above, or pick a thumbnail")
 
     def _on_thumb(self, _button, path: str) -> None:
         self.selected = path
@@ -650,6 +681,14 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         self._build_lockscreen_page()
         self._build_palette_page()
 
+        # The wallpaper on screen needs a border of its own, so it can be told
+        # apart from the image that is selected in the picker.
+        self._css = Gtk.CssProvider()
+        self._css.load_from_data(CURRENT_CSS)
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(), self._css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
         # The desktop changes without the window being told, so the window
         # looks at the world now and then. Without this the swatches show a
         # palette that is no longer the one on screen.
@@ -664,6 +703,10 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         now = Adw.PreferencesGroup(title="Right now")
         page.add(now)
         self.now_row = Adw.ActionRow(title="The wallpaper on screen")
+        self.now_picture = Gtk.Picture()
+        self.now_picture.set_size_request(110, 62)
+        self.now_picture.set_valign(Gtk.Align.CENTER)
+        self.now_row.add_prefix(self.now_picture)
         now.add(self.now_row)
 
         # A PreferencesPage only accepts groups, so the loose rows go in one.
@@ -887,6 +930,17 @@ class ThemeWallpaperWindow(Adw.ApplicationWindow):
         wallpaper = self._current_wallpaper()
         self.now_row.set_title("The wallpaper on screen")
         self.now_row.set_subtitle(os.path.basename(wallpaper) if wallpaper else "Nothing yet")
+        # Show the picture itself, so the tab shows the wallpaper and not
+        # only its file name.
+        if wallpaper:
+            texture = make_thumbnail(wallpaper)
+            if texture is not None:
+                self.now_picture.set_paintable(texture)
+                self.now_picture.set_visible(True)
+            else:
+                self.now_picture.set_visible(False)
+        else:
+            self.now_picture.set_visible(False)
 
         lock = self._current_lock_screen()
         self.lock_now_row.set_title("The lock screen image")

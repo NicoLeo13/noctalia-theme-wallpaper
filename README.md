@@ -268,9 +268,10 @@ using, not a fresh one it drew. It checks every three seconds, so a wallpaper
 change made anywhere shows up on its own. **Draw a new one** makes another
 palette and shows it, and **Use this palette** makes it the live one.
 
-The other two tabs keep up as well. Each has a **Right now** group that says
-what the desktop is really showing, and the wallpaper on screen is marked in the
-picker.
+The other two tabs keep up as well. Each has a **Right now** group that shows
+the picture the desktop is really using, and the wallpaper on screen is marked in
+the picker with a border of its own, so it cannot be mistaken for the image that
+is selected.
 
 The name of a saved palette is up to you. A name that starts with the wallpaper
 name groups it under that wallpaper.
